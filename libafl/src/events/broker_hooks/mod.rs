@@ -126,7 +126,7 @@ where
                 monitor.client_stats_insert(id);
                 let client = monitor.client_stats_mut_for(id);
                 client.update_corpus_size(*corpus_size as u64);
-                client.update_fast_corpus_size(*corpus_size as u64);
+                client.update_fast_corpus_size(*fast_corpus_size as u64);
                 monitor.display(event.name(), id);
                 Ok(BrokerEventResult::Forward)
             }
