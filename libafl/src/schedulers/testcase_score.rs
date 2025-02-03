@@ -15,9 +15,13 @@ use crate::{
 };
 
 /// Compute the favor factor of a [`Testcase`]. Higher is better.
-pub trait TestcaseScore<I, S> {
+pub trait TestcaseScore<S>
+where
+    S: HasCorpus,
+{
     /// Computes the favor factor of a [`Testcase`]. Higher is better.
-    fn compute(state: &S, entry: &mut Testcase<I>) -> Result<f64, Error>;
+    fn compute(state: &S, entry: &mut Testcase<<S::Corpus as Corpus>::Input>)
+        -> Result<f64, Error>;
 }
 
 /// Multiply the testcase size with the execution time.
@@ -25,13 +29,16 @@ pub trait TestcaseScore<I, S> {
 #[derive(Debug, Clone)]
 pub struct LenTimeMulTestcaseScore {}
 
-impl<I, S> TestcaseScore<I, S> for LenTimeMulTestcaseScore
+impl<S> TestcaseScore<S> for LenTimeMulTestcaseScore
 where
-    S: HasCorpus<I>,
-    I: HasLen,
+    S: HasCorpus,
+    <S::Corpus as Corpus>::Input: HasLen,
 {
     #[expect(clippy::cast_precision_loss)]
-    fn compute(state: &S, entry: &mut Testcase<I>) -> Result<f64, Error> {
+    fn compute(
+        state: &S,
+        entry: &mut Testcase<<S::Corpus as Corpus>::Input>,
+    ) -> Result<f64, Error> {
         // TODO maybe enforce entry.exec_time().is_some()
         Ok(entry.exec_time().map_or(1, |d| d.as_millis()) as f64
             * entry.load_len(state.corpus())? as f64)
@@ -48,13 +55,16 @@ const HAVOC_MAX_MULT: f64 = 64.0;
 #[derive(Debug, Clone)]
 pub struct CorpusPowerTestcaseScore {}
 
-impl<I, S> TestcaseScore<I, S> for CorpusPowerTestcaseScore
+impl<S> TestcaseScore<S> for CorpusPowerTestcaseScore
 where
-    S: HasCorpus<I> + HasMetadata,
+    S: HasCorpus + HasMetadata,
 {
     /// Compute the `power` we assign to each corpus entry
     #[expect(clippy::cast_precision_loss, clippy::too_many_lines)]
-    fn compute(state: &S, entry: &mut Testcase<I>) -> Result<f64, Error> {
+    fn compute(
+        state: &S,
+        entry: &mut Testcase<<S::Corpus as Corpus>::Input>,
+    ) -> Result<f64, Error> {
         let psmeta = state.metadata::<SchedulerMetadata>()?;
 
         let fuzz_mu = if let Some(strat) = psmeta.strat() {
@@ -262,13 +272,16 @@ where
 #[derive(Debug, Clone)]
 pub struct CorpusWeightTestcaseScore {}
 
-impl<I, S> TestcaseScore<I, S> for CorpusWeightTestcaseScore
+impl<S> TestcaseScore<S> for CorpusWeightTestcaseScore
 where
-    S: HasCorpus<I> + HasMetadata,
+    S: HasCorpus + HasMetadata,
 {
     /// Compute the `weight` used in weighted corpus entry selection algo
     #[expect(clippy::cast_precision_loss)]
-    fn compute(state: &S, entry: &mut Testcase<I>) -> Result<f64, Error> {
+    fn compute(
+        state: &S,
+        entry: &mut Testcase<<S::Corpus as Corpus>::Input>,
+    ) -> Result<f64, Error> {
         let mut weight = 1.0;
         let psmeta = state.metadata::<SchedulerMetadata>()?;
 
@@ -312,15 +325,7 @@ where
             None => 0.0,
         };
 
-        let avg_top_size = match state.metadata::<TopRatedsMetadata>() {
-            Ok(m) => m.map().len() as f64,
-            Err(e) => {
-                return Err(Error::key_not_found(format!(
-                    "{e:?} You have to use Minimizer scheduler with this.",
-                )))
-            }
-        };
-
+        let avg_top_size = state.metadata::<TopRatedsMetadata>()?.map().len() as f64;
         weight *= 1.0 + (tc_ref / avg_top_size);
 
         if favored {

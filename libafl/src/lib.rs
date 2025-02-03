@@ -64,6 +64,7 @@ extern crate libafl_derive;
 #[doc(hidden)]
 pub use libafl_derive::*;
 
+pub mod bitmap;
 pub mod common;
 pub use common::*;
 pub mod corpus;
@@ -86,8 +87,6 @@ pub use libafl_bolts::{nonzero, Error};
 /// The purpose of this module is to alleviate imports of many components by adding a glob import.
 #[cfg(feature = "prelude")]
 pub mod prelude {
-    #![expect(ambiguous_glob_reexports)]
-
     pub use super::{
         corpus::*, events::*, executors::*, feedbacks::*, fuzzer::*, generators::*, inputs::*,
         monitors::*, mutators::*, observers::*, schedulers::*, stages::*, state::*, *,
@@ -192,14 +191,14 @@ mod tests {
 
         let state_serialized = postcard::to_allocvec(&state).unwrap();
         let state_deserialized: StdState<
-            InMemoryCorpus<BytesInput>,
             _,
+            InMemoryCorpus<BytesInput>,
             StdRand,
             InMemoryCorpus<BytesInput>,
         > = postcard::from_bytes::<
             StdState<
-                InMemoryCorpus<BytesInput>,
                 BytesInput,
+                InMemoryCorpus<BytesInput>,
                 RomuDuoJrRand,
                 InMemoryCorpus<BytesInput>,
             >,

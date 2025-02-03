@@ -5,7 +5,7 @@ use core::{
     marker::PhantomData,
     ops::IndexMut,
 };
-#[cfg(all(feature = "intel_pt", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 use std::{
     ffi::{CStr, CString},
     os::fd::AsRawFd,
@@ -19,14 +19,14 @@ use std::{
     time::Duration,
 };
 
-#[cfg(all(feature = "intel_pt", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 use libafl_bolts::core_affinity::CoreId;
 use libafl_bolts::{
     fs::{get_unique_std_input_file, InputFile},
     tuples::{Handle, MatchName, RefIndexable},
     AsSlice,
 };
-#[cfg(all(feature = "intel_pt", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 use libc::STDIN_FILENO;
 #[cfg(target_os = "linux")]
 use nix::{
@@ -42,17 +42,16 @@ use nix::{
     },
     unistd::Pid,
 };
-#[cfg(all(feature = "intel_pt", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 use typed_builder::TypedBuilder;
 
 use super::HasTimeout;
-#[cfg(target_os = "linux")]
-use crate::executors::hooks::ExecutorHooksTuple;
 use crate::{
-    executors::{Executor, ExitKind, HasObservers},
-    inputs::HasTargetBytes,
+    corpus::Corpus,
+    executors::{hooks::ExecutorHooksTuple, Executor, ExitKind, HasObservers},
+    inputs::{HasTargetBytes, Input, UsesInput},
     observers::{ObserversTuple, StdErrObserver, StdOutObserver},
-    state::HasExecutions,
+    state::{HasCorpus, HasExecutions, State, UsesState},
     std::borrow::ToOwned,
     Error,
 };
@@ -182,7 +181,7 @@ where
 ///
 /// This configurator was primarly developed to be used in conjunction with
 /// [`crate::executors::hooks::intel_pt::IntelPTHook`]
-#[cfg(all(feature = "intel_pt", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq, TypedBuilder)]
 pub struct PTraceCommandConfigurator {
     #[builder(setter(into))]
@@ -199,7 +198,7 @@ pub struct PTraceCommandConfigurator {
     timeout: u32,
 }
 
-#[cfg(all(feature = "intel_pt", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 impl<I> CommandConfigurator<I, Pid> for PTraceCommandConfigurator
 where
     I: HasTargetBytes,
@@ -279,16 +278,17 @@ where
 ///
 /// Construct a `CommandExecutor` by implementing [`CommandConfigurator`] for a type of your choice and calling [`CommandConfigurator::into_executor`] on it.
 /// Instead, you can use [`CommandExecutor::builder()`] to construct a [`CommandExecutor`] backed by a [`StdCommandConfigurator`].
-pub struct CommandExecutor<I, OT, S, T, HT = (), C = Child> {
+pub struct CommandExecutor<OT, S, T, HT = (), C = Child> {
     /// The wrapped command configurer
     configurer: T,
     /// The observers used by this executor
     observers: OT,
     hooks: HT,
-    phantom: PhantomData<(C, I, S)>,
+    phantom: PhantomData<S>,
+    phantom_child: PhantomData<C>,
 }
 
-impl CommandExecutor<(), (), (), ()> {
+impl CommandExecutor<(), (), ()> {
     /// Creates a builder for a new [`CommandExecutor`],
     /// backed by a [`StdCommandConfigurator`]
     /// This is usually the easiest way to construct a [`CommandExecutor`].
@@ -306,7 +306,7 @@ impl CommandExecutor<(), (), (), ()> {
     }
 }
 
-impl<I, OT, S, T, HT, C> Debug for CommandExecutor<I, OT, S, T, HT, C>
+impl<OT, S, T, HT, C> Debug for CommandExecutor<OT, S, T, HT, C>
 where
     T: Debug,
     OT: Debug,
@@ -321,7 +321,11 @@ where
     }
 }
 
-impl<I, OT, S, T, HT, C> CommandExecutor<I, OT, S, T, HT, C> {
+impl<OT, S, T, HT, C> CommandExecutor<OT, S, T, HT, C>
+where
+    T: Debug,
+    OT: Debug,
+{
     /// Accesses the inner value
     pub fn inner(&mut self) -> &mut T {
         &mut self.configurer
@@ -329,11 +333,11 @@ impl<I, OT, S, T, HT, C> CommandExecutor<I, OT, S, T, HT, C> {
 }
 
 // this only works on unix because of the reliance on checking the process signal for detecting OOM
-impl<I, OT, S, T> CommandExecutor<I, OT, S, T>
+impl<I, OT, S, T> CommandExecutor<OT, S, T>
 where
-    S: HasExecutions,
+    S: State + HasExecutions + UsesInput<Input = I>,
     T: CommandConfigurator<I> + Debug,
-    OT: ObserversTuple<I, S>,
+    OT: Debug + ObserversTuple<I, S>,
 {
     fn execute_input_with_command(&mut self, state: &mut S, input: &I) -> Result<ExitKind, Error> {
         use wait_timeout::ChildExt;
@@ -368,7 +372,7 @@ where
              })?.read_to_end(&mut stdout)?;
             let mut observers = self.observers_mut();
             let obs = observers.index_mut(h);
-            obs.observe(&stdout);
+            obs.observe_stdout(&stdout);
         }
         if let Some(h) = &mut self.configurer.stderr_observer() {
             let mut stderr = Vec::new();
@@ -379,33 +383,35 @@ where
              })?.read_to_end(&mut stderr)?;
             let mut observers = self.observers_mut();
             let obs = observers.index_mut(h);
-            obs.observe(&stderr);
+            obs.observe_stderr(&stderr);
         }
         Ok(exit_kind)
     }
 }
 
-impl<EM, I, OT, S, T, Z> Executor<EM, I, S, Z> for CommandExecutor<I, OT, S, T>
+impl<EM, OT, S, T, Z> Executor<EM, Z> for CommandExecutor<OT, S, T>
 where
-    S: HasExecutions,
-    T: CommandConfigurator<I> + Debug,
-    OT: MatchName + ObserversTuple<I, S>,
+    EM: UsesState<State = S>,
+    S: State + HasExecutions + UsesInput,
+    T: CommandConfigurator<S::Input> + Debug,
+    OT: Debug + MatchName + ObserversTuple<S::Input, S>,
 {
     fn run_target(
         &mut self,
         _fuzzer: &mut Z,
-        state: &mut S,
+        state: &mut Self::State,
         _mgr: &mut EM,
-        input: &I,
+        input: &Self::Input,
     ) -> Result<ExitKind, Error> {
         self.execute_input_with_command(state, input)
     }
 }
 
 // this only works on unix because of the reliance on checking the process signal for detecting OOM
-impl<I, OT, S, T> HasTimeout for CommandExecutor<I, OT, S, T>
+impl<OT, S, T> HasTimeout for CommandExecutor<OT, S, T>
 where
-    T: CommandConfigurator<I>,
+    S: HasCorpus,
+    T: CommandConfigurator<<S::Corpus as Corpus>::Input>,
 {
     #[inline]
     fn timeout(&self) -> Duration {
@@ -419,12 +425,13 @@ where
 }
 
 #[cfg(target_os = "linux")]
-impl<EM, I, OT, S, T, Z, HT> Executor<EM, I, S, Z> for CommandExecutor<I, OT, S, T, HT, Pid>
+impl<EM, OT, S, T, Z, HT> Executor<EM, Z> for CommandExecutor<OT, S, T, HT, Pid>
 where
-    HT: ExecutorHooksTuple<I, S>,
-    OT: MatchName + ObserversTuple<I, S>,
-    S: HasExecutions,
-    T: CommandConfigurator<I, Pid> + Debug,
+    EM: UsesState<State = S>,
+    S: State + HasExecutions + UsesInput,
+    T: CommandConfigurator<S::Input, Pid> + Debug,
+    OT: Debug + MatchName + ObserversTuple<S::Input, S>,
+    HT: ExecutorHooksTuple<S>,
 {
     /// Linux specific low level implementation, to directly handle `fork`, `exec` and use linux
     /// `ptrace`
@@ -434,9 +441,9 @@ where
     fn run_target(
         &mut self,
         _fuzzer: &mut Z,
-        state: &mut S,
+        state: &mut Self::State,
         _mgr: &mut EM,
-        input: &I,
+        input: &Self::Input,
     ) -> Result<ExitKind, Error> {
         *state.executions_mut() += 1;
 
@@ -464,7 +471,7 @@ where
 
         self.observers.pre_exec_child_all(state, input)?;
         if *state.executions() == 1 {
-            self.hooks.init_all(state);
+            self.hooks.init_all::<Self>(state);
         }
         self.hooks.pre_exec_all(state, input);
 
@@ -494,9 +501,18 @@ where
     }
 }
 
-impl<I, OT, S, T, HT, C> HasObservers for CommandExecutor<I, OT, S, T, HT, C>
+impl<OT, S, T, HT, C> UsesState for CommandExecutor<OT, S, T, HT, C>
 where
-    OT: ObserversTuple<I, S>,
+    S: State,
+{
+    type State = S;
+}
+
+impl<OT, S, T, HT, C> HasObservers for CommandExecutor<OT, S, T, HT, C>
+where
+    S: State,
+    T: Debug,
+    OT: ObserversTuple<S::Input, S>,
 {
     type Observers = OT;
 
@@ -674,13 +690,14 @@ impl CommandExecutorBuilder {
     }
 
     /// Builds the `CommandExecutor`
-    pub fn build<I, OT, S>(
+    pub fn build<OT, S>(
         &self,
         observers: OT,
-    ) -> Result<CommandExecutor<I, OT, S, StdCommandConfigurator>, Error>
+    ) -> Result<CommandExecutor<OT, S, StdCommandConfigurator>, Error>
     where
-        I: HasTargetBytes,
-        OT: MatchName + ObserversTuple<I, S>,
+        OT: MatchName + ObserversTuple<S::Input, S>,
+        S: UsesInput,
+        S::Input: Input + HasTargetBytes,
     {
         let Some(program) = &self.program else {
             return Err(Error::illegal_argument(
@@ -728,7 +745,7 @@ impl CommandExecutorBuilder {
             command,
         };
         Ok(
-            <StdCommandConfigurator as CommandConfigurator<I>>::into_executor::<OT, S>(
+            <StdCommandConfigurator as CommandConfigurator<S::Input>>::into_executor::<OT, S>(
                 configurator,
                 observers,
             ),
@@ -740,7 +757,7 @@ impl CommandExecutorBuilder {
 /// # Example
 /// ```
 /// use std::{io::Write, process::{Stdio, Command, Child}, time::Duration};
-/// use libafl::{Error, corpus::Corpus, inputs::{BytesInput, HasTargetBytes, Input}, executors::{Executor, command::CommandConfigurator}, state::{HasExecutions}};
+/// use libafl::{Error, inputs::{BytesInput, HasTargetBytes, Input, UsesInput}, executors::{Executor, command::CommandConfigurator}, state::{UsesState, HasExecutions}};
 /// use libafl_bolts::AsSlice;
 /// #[derive(Debug)]
 /// struct MyExecutor;
@@ -770,9 +787,10 @@ impl CommandExecutorBuilder {
 ///     }
 /// }
 ///
-/// fn make_executor<EM, S, Z>() -> impl Executor<EM, BytesInput, S, Z>
+/// fn make_executor<EM, Z>() -> impl Executor<EM, Z>
 /// where
-///     S: HasExecutions,
+///     EM: UsesState,
+///     EM::State: UsesInput<Input = BytesInput> + HasExecutions,
 /// {
 ///     MyExecutor.into_executor(())
 /// }
@@ -808,12 +826,16 @@ pub trait CommandConfigurator<I, C = Child>: Sized {
     }
 
     /// Create an `Executor` from this `CommandConfigurator`.
-    fn into_executor<OT, S>(self, observers: OT) -> CommandExecutor<I, OT, S, Self, (), C> {
+    fn into_executor<OT, S>(self, observers: OT) -> CommandExecutor<OT, S, Self, (), C>
+    where
+        OT: MatchName,
+    {
         CommandExecutor {
             configurer: self,
             observers,
             hooks: (),
             phantom: PhantomData,
+            phantom_child: PhantomData,
         }
     }
 
@@ -822,12 +844,18 @@ pub trait CommandConfigurator<I, C = Child>: Sized {
         self,
         observers: OT,
         hooks: HT,
-    ) -> CommandExecutor<I, OT, S, Self, HT, C> {
+    ) -> CommandExecutor<OT, S, Self, HT, C>
+    where
+        OT: MatchName,
+        HT: ExecutorHooksTuple<S>,
+        S: UsesInput<Input = I>,
+    {
         CommandExecutor {
             configurer: self,
             observers,
             hooks,
             phantom: PhantomData,
+            phantom_child: PhantomData,
         }
     }
 }
@@ -857,7 +885,7 @@ mod tests {
             Executor,
         },
         fuzzer::NopFuzzer,
-        inputs::{BytesInput, NopInput},
+        inputs::BytesInput,
         monitors::SimpleMonitor,
         state::NopState,
     };
@@ -865,10 +893,9 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_builder() {
-        let mut mgr: SimpleEventManager<NopInput, _, NopState<NopInput>> =
-            SimpleEventManager::new(SimpleMonitor::new(|status| {
-                log::info!("{status}");
-            }));
+        let mut mgr = SimpleEventManager::new(SimpleMonitor::new(|status| {
+            log::info!("{status}");
+        }));
 
         let mut executor = CommandExecutor::builder();
         executor
@@ -880,7 +907,7 @@ mod tests {
         executor
             .run_target(
                 &mut NopFuzzer::new(),
-                &mut NopState::<NopInput>::new(),
+                &mut NopState::new(),
                 &mut mgr,
                 &BytesInput::new(b"test".to_vec()),
             )

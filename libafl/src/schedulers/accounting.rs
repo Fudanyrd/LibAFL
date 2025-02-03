@@ -104,17 +104,17 @@ impl TopAccountingMetadata {
 
 /// A minimizer scheduler using coverage accounting
 #[derive(Debug)]
-pub struct CoverageAccountingScheduler<'a, CS, I, O> {
+pub struct CoverageAccountingScheduler<'a, CS, O> {
     accounting_map: &'a [u32],
     skip_non_favored_prob: f64,
-    inner: IndexesLenTimeMinimizerScheduler<CS, I, O>,
+    inner: IndexesLenTimeMinimizerScheduler<CS, O>,
 }
 
-impl<CS, I, O, S> Scheduler<I, S> for CoverageAccountingScheduler<'_, CS, I, O>
+impl<CS, O, S> Scheduler<<S::Corpus as Corpus>::Input, S> for CoverageAccountingScheduler<'_, CS, O>
 where
-    CS: Scheduler<I, S>,
-    S: HasCorpus<I> + HasMetadata + HasRand,
-    I: HasLen,
+    CS: Scheduler<<S::Corpus as Corpus>::Input, S>,
+    S: HasCorpus + HasMetadata + HasRand,
+    <S::Corpus as Corpus>::Input: HasLen,
     O: CanTrack,
 {
     fn on_add(&mut self, state: &mut S, id: CorpusId) -> Result<(), Error> {
@@ -122,7 +122,12 @@ where
         self.inner.on_add(state, id)
     }
 
-    fn on_evaluation<OT>(&mut self, state: &mut S, input: &I, observers: &OT) -> Result<(), Error>
+    fn on_evaluation<OT>(
+        &mut self,
+        state: &mut S,
+        input: &<S::Corpus as Corpus>::Input,
+        observers: &OT,
+    ) -> Result<(), Error>
     where
         OT: MatchName,
     {
@@ -168,7 +173,7 @@ where
     }
 }
 
-impl<'a, CS, I, O> CoverageAccountingScheduler<'a, CS, I, O>
+impl<'a, CS, O> CoverageAccountingScheduler<'a, CS, O>
 where
     O: CanTrack,
 {
@@ -176,7 +181,7 @@ where
     #[expect(clippy::cast_possible_wrap)]
     pub fn update_accounting_score<S>(&self, state: &mut S, id: CorpusId) -> Result<(), Error>
     where
-        S: HasCorpus<I> + HasMetadata,
+        S: HasCorpus + HasMetadata,
     {
         let mut indexes = vec![];
         let mut new_favoreds = vec![];
@@ -263,7 +268,7 @@ where
     /// Cull the `Corpus`
     pub fn accounting_cull<S>(&self, state: &S) -> Result<(), Error>
     where
-        S: HasCorpus<I> + HasMetadata,
+        S: HasCorpus + HasMetadata,
     {
         let Some(top_rated) = state.metadata_map().get::<TopAccountingMetadata>() else {
             return Ok(());

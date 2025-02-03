@@ -18,7 +18,7 @@ use crate::{
     executors::{Executor, ExitKind, HasObservers},
     feedbacks::{map::MapFeedbackMetadata, HasObserverHandle},
     fuzzer::Evaluator,
-    inputs::Input,
+    inputs::{Input, UsesInput},
     monitors::{AggregatorOps, UserStats, UserStatsValue},
     observers::{MapObserver, ObserversTuple},
     schedulers::powersched::SchedulerMetadata,
@@ -26,14 +26,6 @@ use crate::{
     state::{HasCorpus, HasCurrentTestcase, HasExecutions},
     Error, HasMetadata, HasNamedMetadata,
 };
-
-/// AFL++'s `CAL_CYCLES_FAST` + 1
-const CAL_STAGE_START: usize = 4;
-/// AFL++'s `CAL_CYCLES` + 1
-const CAL_STAGE_MAX: usize = 8;
-
-/// Default name for `CalibrationStage`; derived from AFL++
-pub const CALIBRATION_STAGE_NAME: &str = "calibration";
 
 /// The metadata to keep unstable entries
 /// Formula is same as AFL++: number of unstable entries divided by the number of filled entries.
@@ -77,35 +69,41 @@ impl Default for UnstableEntriesMetadata {
     }
 }
 
+/// Default name for `CalibrationStage`; derived from AFL++
+pub const CALIBRATION_STAGE_NAME: &str = "calibration";
 /// The calibration stage will measure the average exec time and the target's stability for this input.
 #[derive(Clone, Debug)]
-pub struct CalibrationStage<C, E, I, O, OT, S> {
+pub struct CalibrationStage<C, E, O, OT, S> {
     map_observer_handle: Handle<C>,
     map_name: Cow<'static, str>,
     name: Cow<'static, str>,
     stage_max: usize,
     /// If we should track stability
     track_stability: bool,
-    phantom: PhantomData<(E, I, O, OT, S)>,
+    phantom: PhantomData<(E, O, OT, S)>,
 }
 
-impl<C, E, EM, I, O, OT, S, Z> Stage<E, EM, S, Z> for CalibrationStage<C, E, I, O, OT, S>
+const CAL_STAGE_START: usize = 4; // AFL++'s CAL_CYCLES_FAST + 1
+const CAL_STAGE_MAX: usize = 8; // AFL++'s CAL_CYCLES + 1
+
+impl<C, E, EM, O, OT, S, Z> Stage<E, EM, S, Z> for CalibrationStage<C, E, O, OT, S>
 where
-    E: Executor<EM, I, S, Z> + HasObservers<Observers = OT>,
-    EM: EventFirer<I, S>,
+    E: Executor<EM, Z, State = S> + HasObservers<Observers = OT>,
+    EM: EventFirer<State = S>,
     O: MapObserver,
     C: AsRef<O>,
     for<'de> <O as MapObserver>::Entry:
         Serialize + Deserialize<'de> + 'static + Default + Debug + Bounded,
-    OT: ObserversTuple<I, S>,
-    S: HasCorpus<I>
+    OT: ObserversTuple<<S::Corpus as Corpus>::Input, S>,
+    S: HasCorpus
         + HasMetadata
         + HasNamedMetadata
         + HasExecutions
-        + HasCurrentTestcase<I>
-        + HasCurrentCorpusId,
-    Z: Evaluator<E, EM, I, S>,
-    I: Input,
+        + HasCurrentTestcase
+        + HasCurrentCorpusId
+        + UsesInput<Input = <S::Corpus as Corpus>::Input>,
+    Z: Evaluator<E, EM, <S::Corpus as Corpus>::Input, S>,
+    <S::Corpus as Corpus>::Input: Input,
 {
     #[inline]
     #[expect(clippy::too_many_lines, clippy::cast_precision_loss)]
@@ -198,8 +196,8 @@ where
 
                 if iter < CAL_STAGE_MAX {
                     iter += 2;
-                }
-            }
+                };
+            };
 
             total_time += current_time() - start;
 
@@ -234,7 +232,7 @@ where
                             usize::from(*history == O::Entry::default());
                         *history = O::Entry::max_value();
                         unstable_entries.push(idx);
-                    }
+                    };
                 }
 
                 if !unstable_entries.is_empty() && iter < CAL_STAGE_MAX {
@@ -380,12 +378,13 @@ where
     }
 }
 
-impl<C, E, I, O, OT, S> CalibrationStage<C, E, I, O, OT, S>
+impl<C, E, O, OT, S> CalibrationStage<C, E, O, OT, S>
 where
-    C: AsRef<O>,
     O: MapObserver,
     for<'it> O: AsIter<'it, Item = O::Entry>,
-    OT: ObserversTuple<I, S>,
+    C: AsRef<O>,
+    OT: ObserversTuple<<S::Corpus as Corpus>::Input, S>,
+    S: HasCorpus,
 {
     /// Create a new [`CalibrationStage`].
     #[must_use]
@@ -418,7 +417,7 @@ where
     }
 }
 
-impl<C, E, I, O, OT, S> Named for CalibrationStage<C, E, I, O, OT, S> {
+impl<C, E, O, OT, S> Named for CalibrationStage<C, E, O, OT, S> {
     fn name(&self) -> &Cow<'static, str> {
         &self.name
     }

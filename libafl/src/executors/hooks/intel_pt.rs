@@ -10,7 +10,11 @@ use num_traits::SaturatingAdd;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use crate::{executors::hooks::ExecutorHook, Error};
+use crate::{
+    executors::{hooks::ExecutorHook, HasObservers},
+    inputs::UsesInput,
+    Error,
+};
 
 /// Info of a binary's section that can be used during `Intel PT` traces decoding
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,18 +40,18 @@ pub struct IntelPTHook<T> {
     map_len: usize,
 }
 
-impl<I, S, T> ExecutorHook<I, S> for IntelPTHook<T>
+impl<S, T> ExecutorHook<S> for IntelPTHook<T>
 where
-    S: Serialize,
+    S: UsesInput + Serialize,
     T: SaturatingAdd + From<u8> + Debug,
 {
-    fn init(&mut self, _state: &mut S) {}
+    fn init<E: HasObservers>(&mut self, _state: &mut S) {}
 
-    fn pre_exec(&mut self, _state: &mut S, _input: &I) {
+    fn pre_exec(&mut self, _state: &mut S, _input: &S::Input) {
         self.intel_pt.enable_tracing().unwrap();
     }
 
-    fn post_exec(&mut self, _state: &mut S, _input: &I) {
+    fn post_exec(&mut self, _state: &mut S, _input: &S::Input) {
         let pt = &mut self.intel_pt;
         pt.disable_tracing().unwrap();
 

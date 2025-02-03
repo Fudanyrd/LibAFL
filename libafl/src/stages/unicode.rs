@@ -8,6 +8,7 @@ use libafl_bolts::{impl_serdeany, Error};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    corpus::Corpus,
     inputs::{BytesInput, HasTargetBytes},
     stages::Stage,
     state::{HasCorpus, HasCurrentTestcase},
@@ -49,7 +50,7 @@ pub(crate) fn extract_metadata(bytes: &[u8]) -> UnicodeIdentificationMetadata {
                 core::str::from_utf8(&bytes[i..][..e.valid_up_to()]).unwrap()
             });
             if !s.is_empty() {
-                let mut entries = bitvec![0; s.len()];
+                let mut entries = bitvec![0; s.bytes().len()];
                 for (c_idx, _) in s.char_indices() {
                     entries.set(c_idx, true);
                     visited.set(i + c_idx, true);
@@ -70,17 +71,17 @@ pub(crate) fn extract_metadata(bytes: &[u8]) -> UnicodeIdentificationMetadata {
 
 /// Stage which identifies potential strings in the provided input
 #[derive(Debug)]
-pub struct UnicodeIdentificationStage<I, S> {
-    phantom: PhantomData<(I, S)>,
+pub struct UnicodeIdentificationStage<S> {
+    phantom: PhantomData<S>,
 }
 
-impl<I, S> Default for UnicodeIdentificationStage<I, S> {
+impl<S> Default for UnicodeIdentificationStage<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<I, S> UnicodeIdentificationStage<I, S> {
+impl<S> UnicodeIdentificationStage<S> {
     /// Create a new instance of the string identification stage
     #[must_use]
     pub fn new() -> Self {
@@ -90,8 +91,8 @@ impl<I, S> UnicodeIdentificationStage<I, S> {
     }
     fn identify_unicode_in_current_testcase(state: &mut S) -> Result<(), Error>
     where
-        S: HasCurrentTestcase<I>,
-        I: HasTargetBytes,
+        S: HasCurrentTestcase,
+        <S::Corpus as Corpus>::Input: HasTargetBytes,
     {
         let mut tc = state.current_testcase_mut()?;
         if tc.has_metadata::<UnicodeIdentificationMetadata>() {
@@ -108,10 +109,21 @@ impl<I, S> UnicodeIdentificationStage<I, S> {
     }
 }
 
-impl<E, EM, S, Z> Stage<E, EM, S, Z> for UnicodeIdentificationStage<BytesInput, S>
+impl<E, EM, S, Z> Stage<E, EM, S, Z> for UnicodeIdentificationStage<S>
 where
-    S: HasCorpus<BytesInput> + HasCurrentTestcase<BytesInput>,
+    S: HasCorpus + HasCurrentTestcase,
+    S::Corpus: Corpus<Input = BytesInput>,
 {
+    fn perform(
+        &mut self,
+        _fuzzer: &mut Z,
+        _executor: &mut E,
+        state: &mut S,
+        _manager: &mut EM,
+    ) -> Result<(), Error> {
+        UnicodeIdentificationStage::identify_unicode_in_current_testcase(state)
+    }
+
     #[inline]
     fn should_restart(&mut self, _state: &mut S) -> Result<bool, Error> {
         // Stage does not run the target. No reset helper needed.
@@ -122,15 +134,5 @@ where
     fn clear_progress(&mut self, _state: &mut S) -> Result<(), Error> {
         // Stage does not run the target. No reset helper needed.
         Ok(())
-    }
-
-    fn perform(
-        &mut self,
-        _fuzzer: &mut Z,
-        _executor: &mut E,
-        state: &mut S,
-        _manager: &mut EM,
-    ) -> Result<(), Error> {
-        UnicodeIdentificationStage::identify_unicode_in_current_testcase(state)
     }
 }

@@ -237,7 +237,7 @@ mod tests {
             DiffFeedback::<_, _, _>::is_interesting(
                 &mut diff_feedback,
                 &mut nop_state,
-                &mut NopEventManager::default(),
+                &mut NopEventManager::<NopState<BytesInput>>::default(),
                 &BytesInput::new(vec![0]),
                 &observers,
                 &ExitKind::Ok

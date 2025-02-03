@@ -25,6 +25,7 @@ use crate::{
     events::{Event, EventFirer},
     executors::ExitKind,
     feedbacks::{Feedback, HasObserverHandle, StateInitializer},
+    inputs::UsesInput,
     monitors::{AggregatorOps, UserStats, UserStatsValue},
     observers::{CanTrack, MapObserver},
     Error, HasMetadata, HasNamedMetadata,
@@ -394,13 +395,13 @@ where
 impl<C, EM, I, N, O, OT, R, S> Feedback<EM, I, OT, S> for MapFeedback<C, N, O, R>
 where
     C: CanTrack + AsRef<O>,
-    EM: EventFirer<I, S>,
+    EM: EventFirer<State = S>,
     N: IsNovel<O::Entry>,
     O: MapObserver + for<'it> AsIter<'it, Item = O::Entry>,
     O::Entry: 'static + Default + Debug + DeserializeOwned + Serialize,
     OT: MatchName,
     R: Reducer<O::Entry>,
-    S: HasNamedMetadata,
+    S: HasNamedMetadata + UsesInput, // delete me
 {
     #[rustversion::nightly]
     default fn is_interesting(
@@ -537,10 +538,10 @@ where
 impl<C, O, EM, I, OT, S> Feedback<EM, I, OT, S> for MapFeedback<C, DifferentIsNovel, O, MaxReducer>
 where
     C: CanTrack + AsRef<O>,
-    EM: EventFirer<I, S>,
+    EM: EventFirer<State = S>,
     O: MapObserver<Entry = u8> + for<'a> AsSlice<'a, Entry = u8> + for<'a> AsIter<'a, Item = u8>,
     OT: MatchName,
-    S: HasNamedMetadata,
+    S: HasNamedMetadata + UsesInput,
 {
     fn is_interesting(
         &mut self,

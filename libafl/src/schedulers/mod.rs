@@ -1,7 +1,7 @@
 //! Schedule the access to the Corpus.
 
 use alloc::{borrow::ToOwned, string::ToString};
-use core::{hash::Hash, marker::PhantomData};
+use core::marker::PhantomData;
 
 pub mod testcase_score;
 pub use testcase_score::{LenTimeMulTestcaseScore, TestcaseScore};
@@ -23,12 +23,14 @@ pub use probabilistic_sampling::ProbabilitySamplingScheduler;
 pub mod accounting;
 pub use accounting::CoverageAccountingScheduler;
 
+pub mod setcover;
+pub use setcover::SetcoverScheduler;
+
 pub mod weighted;
 pub use weighted::{StdWeightedScheduler, WeightedScheduler};
 
 pub mod tuneable;
 use libafl_bolts::{
-    generic_hash_std,
     rands::Rand,
     tuples::{Handle, MatchName, MatchNameRef},
 };
@@ -36,6 +38,7 @@ pub use tuneable::*;
 
 use crate::{
     corpus::{Corpus, CorpusId, HasTestcase, SchedulerTestcaseMetadata, Testcase},
+    observers::MapObserver,
     random_corpus_id,
     state::{HasCorpus, HasRand},
     Error, HasMetadata,
@@ -66,14 +69,14 @@ pub trait RemovableScheduler<I, S> {
 }
 
 /// Called when a [`Testcase`] is evaluated
-pub fn on_add_metadata_default<CS, I, S>(
+pub fn on_add_metadata_default<CS, S>(
     scheduler: &mut CS,
     state: &mut S,
     id: CorpusId,
 ) -> Result<(), Error>
 where
     CS: AflScheduler,
-    S: HasTestcase<I> + HasCorpus<I>,
+    S: HasTestcase + HasCorpus,
 {
     let current_id = *state.corpus().current();
 
@@ -107,19 +110,19 @@ pub fn on_evaluation_metadata_default<CS, O, OT, S>(
 ) -> Result<(), Error>
 where
     CS: AflScheduler,
-    CS::ObserverRef: AsRef<O>,
+    CS::MapObserverRef: AsRef<O>,
     S: HasMetadata,
-    O: Hash,
+    O: MapObserver,
     OT: MatchName,
 {
-    let observer = observers
-        .get(scheduler.observer_handle())
-        .ok_or_else(|| Error::key_not_found("Observer not found".to_string()))?
+    let observer: &O = observers
+        .get(scheduler.map_observer_handle())
+        .ok_or_else(|| Error::key_not_found("MapObserver not found".to_string()))?
         .as_ref();
 
-    let mut hash = generic_hash_std(observer) as usize;
+    let mut hash: usize = observer.hash_simple() as usize;
 
-    let psmeta = state.metadata_mut::<SchedulerMetadata>()?;
+    let psmeta: &mut SchedulerMetadata = state.metadata_mut::<SchedulerMetadata>()?;
 
     hash %= psmeta.n_fuzz().len();
     // Update the path frequency
@@ -131,14 +134,17 @@ where
 }
 
 /// Called when choosing the next [`Testcase`]
-pub fn on_next_metadata_default<I, S>(state: &mut S) -> Result<(), Error>
+pub fn on_next_metadata_default<S>(state: &mut S) -> Result<(), Error>
 where
-    S: HasCorpus<I> + HasTestcase<I>,
+    S: HasCorpus + HasTestcase,
 {
     let current_id = *state.corpus().current();
 
     if let Some(id) = current_id {
-        let mut testcase = state.testcase_mut(id)?;
+        let mut testcase: core::cell::RefMut<
+            '_,
+            Testcase<<<S as HasCorpus>::Corpus as Corpus>::Input>,
+        > = state.testcase_mut(id)?;
         let tcmeta = testcase.metadata_mut::<SchedulerTestcaseMetadata>()?;
 
         if tcmeta.handicap() >= 4 {
@@ -153,8 +159,8 @@ where
 
 /// Defines the common metadata operations for the AFL-style schedulers
 pub trait AflScheduler {
-    /// The type of [`crate::observers::Observer`] that this scheduler will use as reference
-    type ObserverRef;
+    /// The type of [`MapObserver`] that this scheduler will use as reference
+    type MapObserverRef;
 
     /// Return the last hash
     fn last_hash(&self) -> usize;
@@ -162,8 +168,8 @@ pub trait AflScheduler {
     /// Set the last hash
     fn set_last_hash(&mut self, value: usize);
 
-    /// Get the observer handle
-    fn observer_handle(&self) -> &Handle<Self::ObserverRef>;
+    /// Get the observer map observer name
+    fn map_observer_handle(&self) -> &Handle<Self::MapObserverRef>;
 }
 
 /// Trait for Schedulers which track queue cycles
@@ -215,7 +221,7 @@ pub struct RandScheduler<S> {
 
 impl<I, S> Scheduler<I, S> for RandScheduler<S>
 where
-    S: HasCorpus<I> + HasRand,
+    S: HasCorpus + HasRand,
 {
     fn on_add(&mut self, state: &mut S, id: CorpusId) -> Result<(), Error> {
         // Set parent id

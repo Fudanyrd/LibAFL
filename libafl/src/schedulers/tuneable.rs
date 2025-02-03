@@ -90,9 +90,9 @@ impl TuneableScheduler {
     }
 
     /// Gets the current corpus entry id
-    pub fn get_current<I, S>(state: &S) -> CorpusId
+    pub fn get_current<S>(state: &S) -> CorpusId
     where
-        S: HasCorpus<I>,
+        S: HasCorpus,
     {
         state
             .corpus()
@@ -105,7 +105,7 @@ impl<I, S> RemovableScheduler<I, S> for TuneableScheduler {}
 
 impl<I, S> Scheduler<I, S> for TuneableScheduler
 where
-    S: HasCorpus<I> + HasMetadata,
+    S: HasCorpus + HasMetadata,
 {
     fn on_add(&mut self, state: &mut S, id: CorpusId) -> Result<(), Error> {
         // Set parent id

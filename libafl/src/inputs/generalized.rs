@@ -9,6 +9,7 @@ use crate::{
     corpus::Testcase,
     inputs::BytesInput,
     stages::mutational::{MutatedTransform, MutatedTransformPost},
+    state::HasCorpus,
     Error, HasMetadata,
 };
 
@@ -104,7 +105,10 @@ impl GeneralizedInputMetadata {
     }
 }
 
-impl<S> MutatedTransform<BytesInput, S> for GeneralizedInputMetadata {
+impl<S> MutatedTransform<BytesInput, S> for GeneralizedInputMetadata
+where
+    S: HasCorpus,
+{
     type Post = Self;
 
     fn try_transform_from(base: &mut Testcase<BytesInput>, _state: &S) -> Result<Self, Error> {
@@ -126,4 +130,4 @@ impl<S> MutatedTransform<BytesInput, S> for GeneralizedInputMetadata {
     }
 }
 
-impl<S> MutatedTransformPost<S> for GeneralizedInputMetadata {}
+impl<S> MutatedTransformPost<S> for GeneralizedInputMetadata where S: HasCorpus {}

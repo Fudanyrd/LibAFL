@@ -14,12 +14,16 @@ use nix::unistd::{fork, ForkResult};
 
 use super::hooks::ExecutorHooksTuple;
 use crate::{
+    events::{EventFirer, EventRestarter},
     executors::{
         hooks::inprocess_fork::InProcessForkExecutorGlobalData,
         inprocess_fork::inner::GenericInProcessForkExecutorInner, Executor, ExitKind, HasObservers,
     },
+    feedbacks::Feedback,
+    fuzzer::HasObjective,
+    inputs::UsesInput,
     observers::ObserversTuple,
-    state::HasExecutions,
+    state::{HasExecutions, HasSolutions, State, UsesState},
     Error,
 };
 
@@ -39,12 +43,19 @@ pub mod stateful;
 ///
 /// On Linux, when fuzzing a Rust target, set `panic = "abort"` in your `Cargo.toml` (see [Cargo documentation](https://doc.rust-lang.org/cargo/reference/profiles.html#panic)).
 /// Else panics can not be caught by `LibAFL`.
-pub type InProcessForkExecutor<'a, EM, H, I, OT, S, SP, Z> =
-    GenericInProcessForkExecutor<'a, EM, H, (), I, OT, S, SP, Z>;
+pub type InProcessForkExecutor<'a, H, OT, S, SP, EM, Z> =
+    GenericInProcessForkExecutor<'a, H, (), OT, S, SP, EM, Z>;
 
-impl<'a, H, I, OT, S, SP, EM, Z> InProcessForkExecutor<'a, EM, H, I, OT, S, SP, Z>
+impl<'a, H, OT, S, SP, EM, Z, OF> InProcessForkExecutor<'a, H, OT, S, SP, EM, Z>
 where
-    OT: ObserversTuple<I, S>,
+    H: FnMut(&S::Input) -> ExitKind + ?Sized,
+    S: State,
+    OT: ObserversTuple<S::Input, S>,
+    SP: ShMemProvider,
+    EM: EventFirer<State = S> + EventRestarter<State = S>,
+    OF: Feedback<EM, S::Input, OT, S>,
+    S: HasSolutions,
+    Z: HasObjective<Objective = OF>,
 {
     /// The constructor for `InProcessForkExecutor`
     pub fn new(
@@ -73,17 +84,27 @@ where
 ///
 /// On Linux, when fuzzing a Rust target, set `panic = "abort"` in your `Cargo.toml` (see [Cargo documentation](https://doc.rust-lang.org/cargo/reference/profiles.html#panic)).
 /// Else panics can not be caught by `LibAFL`.
-pub struct GenericInProcessForkExecutor<'a, EM, H, HT, I, OT, S, SP, Z> {
+pub struct GenericInProcessForkExecutor<'a, H, HT, OT, S, SP, EM, Z>
+where
+    H: FnMut(&S::Input) -> ExitKind + ?Sized,
+    OT: ObserversTuple<S::Input, S>,
+    S: UsesInput,
+    SP: ShMemProvider,
+    HT: ExecutorHooksTuple<S>,
+    EM: UsesState<State = S>,
+{
     harness_fn: &'a mut H,
-    inner: GenericInProcessForkExecutorInner<EM, HT, I, OT, S, SP, Z>,
+    inner: GenericInProcessForkExecutorInner<HT, OT, S, SP, EM, Z>,
 }
 
-impl<H, HT, I, OT, S, SP, EM, Z> Debug
-    for GenericInProcessForkExecutor<'_, EM, H, HT, I, OT, S, SP, Z>
+impl<H, HT, OT, S, SP, EM, Z> Debug for GenericInProcessForkExecutor<'_, H, HT, OT, S, SP, EM, Z>
 where
-    HT: Debug,
-    OT: Debug,
-    SP: Debug,
+    H: FnMut(&S::Input) -> ExitKind + ?Sized,
+    OT: ObserversTuple<S::Input, S> + Debug,
+    S: UsesInput,
+    SP: ShMemProvider,
+    HT: ExecutorHooksTuple<S> + Debug,
+    EM: UsesState<State = S>,
 {
     #[cfg(target_os = "linux")]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -102,22 +123,36 @@ where
     }
 }
 
-impl<EM, H, HT, I, OT, S, SP, Z> Executor<EM, I, S, Z>
-    for GenericInProcessForkExecutor<'_, EM, H, HT, I, OT, S, SP, Z>
+impl<H, HT, OT, S, SP, EM, Z> UsesState
+    for GenericInProcessForkExecutor<'_, H, HT, OT, S, SP, EM, Z>
 where
-    H: FnMut(&I) -> ExitKind + Sized,
-    HT: ExecutorHooksTuple<I, S>,
-    OT: ObserversTuple<I, S>,
-    S: HasExecutions,
+    H: FnMut(&S::Input) -> ExitKind + ?Sized,
+    OT: ObserversTuple<S::Input, S>,
+    S: State,
     SP: ShMemProvider,
+    HT: ExecutorHooksTuple<S>,
+    EM: UsesState<State = S>,
+{
+    type State = S;
+}
+
+impl<EM, H, HT, OT, S, SP, Z> Executor<EM, Z>
+    for GenericInProcessForkExecutor<'_, H, HT, OT, S, SP, EM, Z>
+where
+    H: FnMut(&S::Input) -> ExitKind + ?Sized,
+    OT: ObserversTuple<S::Input, S> + Debug,
+    S: State + HasExecutions,
+    SP: ShMemProvider,
+    HT: ExecutorHooksTuple<S>,
+    EM: EventFirer<State = S> + EventRestarter<State = S>,
 {
     #[inline]
     fn run_target(
         &mut self,
         fuzzer: &mut Z,
-        state: &mut S,
+        state: &mut Self::State,
         mgr: &mut EM,
-        input: &I,
+        input: &Self::Input,
     ) -> Result<ExitKind, Error> {
         *state.executions_mut() += 1;
 
@@ -141,10 +176,16 @@ where
     }
 }
 
-impl<'a, H, HT, I, OT, S, SP, EM, Z> GenericInProcessForkExecutor<'a, EM, H, HT, I, OT, S, SP, Z>
+impl<'a, H, HT, OT, S, SP, EM, Z, OF> GenericInProcessForkExecutor<'a, H, HT, OT, S, SP, EM, Z>
 where
-    HT: ExecutorHooksTuple<I, S>,
-    OT: ObserversTuple<I, S>,
+    H: FnMut(&S::Input) -> ExitKind + ?Sized,
+    HT: ExecutorHooksTuple<S>,
+    OT: ObserversTuple<S::Input, S>,
+    SP: ShMemProvider,
+    EM: EventFirer<State = S> + EventRestarter<State = S>,
+    OF: Feedback<EM, S::Input, OT, S>,
+    S: State + HasSolutions,
+    Z: HasObjective<Objective = OF>,
 {
     /// Creates a new [`GenericInProcessForkExecutor`] with custom hooks
     #[expect(clippy::too_many_arguments)]
@@ -186,8 +227,15 @@ where {
     }
 }
 
-impl<H, HT, I, OT, S, SP, EM, Z> HasObservers
-    for GenericInProcessForkExecutor<'_, EM, H, HT, I, OT, S, SP, Z>
+impl<H, HT, OT, S, SP, EM, Z> HasObservers
+    for GenericInProcessForkExecutor<'_, H, HT, OT, S, SP, EM, Z>
+where
+    H: FnMut(&S::Input) -> ExitKind + ?Sized,
+    HT: ExecutorHooksTuple<S>,
+    S: State,
+    OT: ObserversTuple<S::Input, S>,
+    SP: ShMemProvider,
+    EM: UsesState<State = S>,
 {
     type Observers = OT;
     #[inline]
@@ -214,14 +262,16 @@ pub mod child_signal_handlers {
             hooks::inprocess_fork::{InProcessForkExecutorGlobalData, FORK_EXECUTOR_GLOBAL_DATA},
             ExitKind, HasObservers,
         },
+        inputs::UsesInput,
         observers::ObserversTuple,
+        state::UsesState,
     };
 
     /// invokes the `post_exec_child` hook on all observer in case the child process panics
-    pub fn setup_child_panic_hook<E, I, S>()
+    pub fn setup_child_panic_hook<E>()
     where
-        E: HasObservers,
-        E::Observers: ObserversTuple<I, S>,
+        E: HasObservers + UsesState,
+        E::Observers: ObserversTuple<<E::State as UsesInput>::Input, E::State>,
     {
         let old_hook = panic::take_hook();
         panic::set_hook(Box::new(move |panic_info| unsafe {
@@ -230,9 +280,9 @@ pub mod child_signal_handlers {
             if !data.is_null() && (*data).is_valid() {
                 let executor = (*data).executor_mut::<E>();
                 let mut observers = executor.observers_mut();
-                let state = (*data).state_mut::<S>();
+                let state = (*data).state_mut::<E::State>();
                 // Invalidate data to not execute again the observer hooks in the crash handler
-                let input = (*data).take_current_input::<I>();
+                let input = (*data).take_current_input::<<E::State as UsesInput>::Input>();
                 observers
                     .post_exec_child_all(state, input, &ExitKind::Crash)
                     .expect("Failed to run post_exec on observers");
@@ -250,20 +300,20 @@ pub mod child_signal_handlers {
     /// It will dereference the `data` pointer and assume it's valid.
     #[cfg(unix)]
     #[allow(clippy::needless_pass_by_value)] // nightly no longer requires this
-    pub(crate) unsafe fn child_crash_handler<E, I, S>(
+    pub(crate) unsafe fn child_crash_handler<E>(
         _signal: Signal,
         _info: &mut siginfo_t,
         _context: Option<&mut ucontext_t>,
         data: &mut InProcessForkExecutorGlobalData,
     ) where
-        E: HasObservers,
-        E::Observers: ObserversTuple<I, S>,
+        E: HasObservers + UsesState,
+        E::Observers: ObserversTuple<<E::State as UsesInput>::Input, E::State>,
     {
         if data.is_valid() {
             let executor = data.executor_mut::<E>();
             let mut observers = executor.observers_mut();
-            let state = data.state_mut::<S>();
-            let input = data.take_current_input::<I>();
+            let state = data.state_mut::<E::State>();
+            let input = data.take_current_input::<<E::State as UsesInput>::Input>();
             observers
                 .post_exec_child_all(state, input, &ExitKind::Crash)
                 .expect("Failed to run post_exec on observers");
@@ -274,20 +324,20 @@ pub mod child_signal_handlers {
 
     #[cfg(unix)]
     #[allow(clippy::needless_pass_by_value)] // nightly no longer requires this
-    pub(crate) unsafe fn child_timeout_handler<E, I, S>(
+    pub(crate) unsafe fn child_timeout_handler<E>(
         #[cfg(unix)] _signal: Signal,
         _info: &mut siginfo_t,
         _context: Option<&mut ucontext_t>,
         data: &mut InProcessForkExecutorGlobalData,
     ) where
-        E: HasObservers,
-        E::Observers: ObserversTuple<I, S>,
+        E: HasObservers + UsesState,
+        E::Observers: ObserversTuple<<E::State as UsesInput>::Input, E::State>,
     {
         if data.is_valid() {
             let executor = data.executor_mut::<E>();
             let mut observers = executor.observers_mut();
-            let state = data.state_mut::<S>();
-            let input = data.take_current_input::<I>();
+            let state = data.state_mut::<E::State>();
+            let input = data.take_current_input::<<E::State as UsesInput>::Input>();
             observers
                 .post_exec_child_all(state, input, &ExitKind::Timeout)
                 .expect("Failed to run post_exec on observers");
@@ -354,7 +404,7 @@ mod tests {
         };
 
         let mut harness = |_buf: &NopInput| ExitKind::Ok;
-        let default = InChildProcessHooks::<NopInput, NopState<NopInput>>::nop();
+        let default = InChildProcessHooks::nop();
         #[cfg(target_os = "linux")]
         let mut in_process_fork_executor = GenericInProcessForkExecutor {
             harness_fn: &mut harness,
@@ -380,8 +430,7 @@ mod tests {
         let input = NopInput {};
         let mut fuzzer = NopFuzzer::new();
         let mut state = NopState::new();
-        let mut mgr: SimpleEventManager<NopInput, _, NopState<NopInput>> =
-            SimpleEventManager::printing();
+        let mut mgr = SimpleEventManager::printing();
         in_process_fork_executor
             .run_target(&mut fuzzer, &mut state, &mut mgr, &input)
             .unwrap();

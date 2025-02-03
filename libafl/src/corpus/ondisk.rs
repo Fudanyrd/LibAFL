@@ -2,7 +2,7 @@
 //!
 //! It _never_ keeps any of them in memory.
 //! This is a good solution for solutions that are never reused, or for *very* memory-constraint environments.
-//! For any other occasions, consider using [`CachedOnDiskCorpus`]
+//! For any other occasions, consider using [`crate::corpus::CachedOnDiskCorpus`]
 //! which stores a certain number of [`Testcase`]s in memory and removes additional ones in a FIFO manner.
 
 use alloc::string::String;
@@ -54,16 +54,27 @@ pub struct OnDiskCorpus<I> {
     dir_path: PathBuf,
     /// We wrapp a cached corpus and set its size to 1.
     inner: CachedOnDiskCorpus<I>,
+    /// favored id of seed.
+    favored_id: Option<CorpusId>,
+    fast_count: usize,
 }
 
-impl<I> Corpus<I> for OnDiskCorpus<I>
+impl<I> Corpus for OnDiskCorpus<I>
 where
     I: Input,
 {
+    type Input = I;
     /// Returns the number of all enabled entries
     #[inline]
     fn count(&self) -> usize {
         self.inner.count()
+    }
+
+    fn count_fast(&self) -> usize {
+        return self.fast_count;
+    }
+    fn set_fast(&mut self, count: usize) {
+        self.fast_count = count;
     }
 
     /// Returns the number of all disabled entries
@@ -93,6 +104,12 @@ where
     #[inline]
     fn replace(&mut self, id: CorpusId, testcase: Testcase<I>) -> Result<Testcase<I>, Error> {
         self.inner.replace(id, testcase)
+    }
+
+    /// Peek the next free corpus id
+    #[inline]
+    fn peek_free_id(&self) -> CorpusId {
+        self.inner.peek_free_id()
     }
 
     /// Removes an entry from the corpus, returning it if it was present; considers both enabled and disabled testcases
@@ -130,12 +147,6 @@ where
         self.inner.next(id)
     }
 
-    /// Peek the next free corpus id
-    #[inline]
-    fn peek_free_id(&self) -> CorpusId {
-        self.inner.peek_free_id()
-    }
-
     #[inline]
     fn prev(&self, id: CorpusId) -> Option<CorpusId> {
         self.inner.prev(id)
@@ -163,17 +174,30 @@ where
     }
 
     #[inline]
-    fn load_input_into(&self, testcase: &mut Testcase<I>) -> Result<(), Error> {
+    fn load_input_into(&self, testcase: &mut Testcase<Self::Input>) -> Result<(), Error> {
         self.inner.load_input_into(testcase)
     }
 
     #[inline]
-    fn store_input_from(&self, testcase: &Testcase<I>) -> Result<(), Error> {
+    fn store_input_from(&self, testcase: &Testcase<Self::Input>) -> Result<(), Error> {
         self.inner.store_input_from(testcase)
+    }
+
+    fn set_favored_id(&mut self, id: CorpusId) -> Result<(), Error> {
+        self.favored_id = Some(id);
+        Ok(())
+    }
+
+    fn get_favored_id(&self) -> Option<CorpusId> {
+        if self.favored_id == None {
+            None
+        } else {
+            Some(self.favored_id.unwrap())
+        }
     }
 }
 
-impl<I> HasTestcase<I> for OnDiskCorpus<I>
+impl<I> HasTestcase for OnDiskCorpus<I>
 where
     I: Input,
 {
@@ -267,6 +291,8 @@ impl<I> OnDiskCorpus<I> {
                 prefix,
                 locking,
             )?,
+            favored_id: None,
+            fast_count: 0,
         })
     }
 

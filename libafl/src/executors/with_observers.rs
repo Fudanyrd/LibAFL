@@ -1,41 +1,51 @@
 //! A wrapper for any [`Executor`] to make it implement [`HasObservers`] using a given [`ObserversTuple`].
 
-use core::{fmt::Debug, marker::PhantomData};
+use core::fmt::Debug;
 
 use libafl_bolts::tuples::RefIndexable;
 
 use crate::{
     executors::{Executor, ExitKind, HasObservers},
+    inputs::UsesInput,
     observers::ObserversTuple,
+    state::UsesState,
     Error,
 };
 
 /// A wrapper for any [`Executor`] to make it implement [`HasObservers`] using a given [`ObserversTuple`].
 #[derive(Debug)]
-pub struct WithObservers<E, I, OT, S> {
+pub struct WithObservers<E, OT> {
     executor: E,
     observers: OT,
-    phantom: PhantomData<(I, S)>,
 }
 
-impl<E, EM, I, OT, S, Z> Executor<EM, I, S, Z> for WithObservers<E, I, OT, S>
+impl<E, EM, OT, Z> Executor<EM, Z> for WithObservers<E, OT>
 where
-    E: Executor<EM, I, S, Z>,
+    E: Executor<EM, Z>,
+    EM: UsesState<State = Self::State>,
 {
     fn run_target(
         &mut self,
         fuzzer: &mut Z,
-        state: &mut S,
+        state: &mut Self::State,
         mgr: &mut EM,
-        input: &I,
+        input: &Self::Input,
     ) -> Result<ExitKind, Error> {
         self.executor.run_target(fuzzer, state, mgr, input)
     }
 }
 
-impl<E, I, OT, S> HasObservers for WithObservers<E, I, OT, S>
+impl<E, OT> UsesState for WithObservers<E, OT>
 where
-    OT: ObserversTuple<I, S>,
+    E: UsesState,
+{
+    type State = E::State;
+}
+
+impl<E, OT> HasObservers for WithObservers<E, OT>
+where
+    E: UsesState,
+    OT: ObserversTuple<<Self as UsesInput>::Input, <Self as UsesState>::State>,
 {
     type Observers = OT;
     fn observers(&self) -> RefIndexable<&Self::Observers, Self::Observers> {
@@ -47,7 +57,7 @@ where
     }
 }
 
-impl<E, I, OT, S> WithObservers<E, I, OT, S> {
+impl<E, OT> WithObservers<E, OT> {
     /// Wraps the given [`Executor`] with the given [`ObserversTuple`] to implement [`HasObservers`].
     ///
     /// If the executor already implements [`HasObservers`], then the original implementation will be overshadowed by
@@ -56,7 +66,6 @@ impl<E, I, OT, S> WithObservers<E, I, OT, S> {
         Self {
             executor,
             observers,
-            phantom: PhantomData,
         }
     }
 }

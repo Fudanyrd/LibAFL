@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 pub use shadow::ShadowExecutor;
 pub use with_observers::WithObservers;
 
-use crate::Error;
+use crate::{state::UsesState, Error};
 
 pub mod combined;
 #[cfg(all(feature = "std", unix))]
@@ -117,14 +117,17 @@ pub trait HasObservers {
 }
 
 /// An executor takes the given inputs, and runs the harness/target.
-pub trait Executor<EM, I, S, Z> {
+pub trait Executor<EM, Z>: UsesState
+where
+    EM: UsesState<State = Self::State>,
+{
     /// Instruct the target about the input and run
     fn run_target(
         &mut self,
         fuzzer: &mut Z,
-        state: &mut S,
+        state: &mut Self::State,
         mgr: &mut EM,
-        input: &I,
+        input: &Self::Input,
     ) -> Result<ExitKind, Error>;
 }
 
@@ -167,7 +170,7 @@ mod test {
         executors::{Executor, ExitKind},
         fuzzer::NopFuzzer,
         inputs::{BytesInput, HasTargetBytes},
-        state::{HasExecutions, NopState},
+        state::{HasExecutions, NopState, State, UsesState},
     };
 
     /// A simple executor that does nothing.
@@ -193,17 +196,25 @@ mod test {
         }
     }
 
-    impl<EM, I, S, Z> Executor<EM, I, S, Z> for NopExecutor<S>
+    impl<S> UsesState for NopExecutor<S>
     where
-        S: HasExecutions,
-        I: HasTargetBytes,
+        S: State,
+    {
+        type State = S;
+    }
+
+    impl<EM, S, Z> Executor<EM, Z> for NopExecutor<S>
+    where
+        EM: UsesState<State = S>,
+        S: State + HasExecutions,
+        S::Input: HasTargetBytes,
     {
         fn run_target(
             &mut self,
             _fuzzer: &mut Z,
-            state: &mut S,
+            state: &mut Self::State,
             _mgr: &mut EM,
-            input: &I,
+            input: &Self::Input,
         ) -> Result<ExitKind, Error> {
             *state.executions_mut() += 1;
 
@@ -221,14 +232,24 @@ mod test {
         let nonempty_input = BytesInput::new(vec![1u8]);
         let mut executor = NopExecutor::new();
         let mut fuzzer = NopFuzzer::new();
-        let mut mgr: NopEventManager = NopEventManager::new();
-        let mut state: NopState<BytesInput> = NopState::new();
+
+        let mut state = NopState::new();
 
         executor
-            .run_target(&mut fuzzer, &mut state, &mut mgr, &empty_input)
+            .run_target(
+                &mut fuzzer,
+                &mut state,
+                &mut NopEventManager::new(),
+                &empty_input,
+            )
             .unwrap_err();
         executor
-            .run_target(&mut fuzzer, &mut state, &mut mgr, &nonempty_input)
+            .run_target(
+                &mut fuzzer,
+                &mut state,
+                &mut NopEventManager::new(),
+                &nonempty_input,
+            )
             .unwrap();
     }
 }

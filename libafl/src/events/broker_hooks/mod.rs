@@ -6,14 +6,15 @@ use core::marker::PhantomData;
 use libafl_bolts::{compress::GzipCompressor, llmp::LLMP_FLAG_COMPRESSED};
 use libafl_bolts::{
     llmp::{Flags, LlmpBrokerInner, LlmpHook, LlmpMsgHookResult, Tag},
+    shmem::ShMemProvider,
     ClientId,
 };
-use serde::de::DeserializeOwned;
 
 #[cfg(feature = "llmp_compression")]
 use crate::events::llmp::COMPRESS_THRESHOLD;
 use crate::{
     events::{llmp::LLMP_TAG_EVENT_TO_BOTH, BrokerEventResult, Event},
+    inputs::Input,
     monitors::Monitor,
     Error,
 };
@@ -39,14 +40,15 @@ pub struct StdLlmpEventHook<I, MT> {
     phantom: PhantomData<I>,
 }
 
-impl<I, MT, SHM, SP> LlmpHook<SHM, SP> for StdLlmpEventHook<I, MT>
+impl<I, MT, SP> LlmpHook<SP> for StdLlmpEventHook<I, MT>
 where
-    I: DeserializeOwned,
+    I: Input,
     MT: Monitor,
+    SP: ShMemProvider,
 {
     fn on_new_message(
         &mut self,
-        _broker_inner: &mut LlmpBrokerInner<SHM, SP>,
+        _broker_inner: &mut LlmpBrokerInner<SP>,
         client_id: ClientId,
         msg_tag: &mut Tag,
         #[cfg(feature = "llmp_compression")] msg_flags: &mut Flags,
@@ -88,6 +90,7 @@ where
 
 impl<I, MT> StdLlmpEventHook<I, MT>
 where
+    I: Input,
     MT: Monitor,
 {
     /// Create an event broker from a raw broker.
@@ -110,6 +113,7 @@ where
         match &event {
             Event::NewTestcase {
                 corpus_size,
+                fast_corpus_size,
                 forward_id,
                 ..
             } => {
@@ -122,6 +126,7 @@ where
                 monitor.client_stats_insert(id);
                 let client = monitor.client_stats_mut_for(id);
                 client.update_corpus_size(*corpus_size as u64);
+                client.update_fast_corpus_size(*corpus_size as u64);
                 monitor.display(event.name(), id);
                 Ok(BrokerEventResult::Forward)
             }
@@ -191,6 +196,7 @@ where
                 log::log!((*severity_level).into(), "{message}");
                 Ok(BrokerEventResult::Handled)
             }
+            Event::CustomBuf { .. } => Ok(BrokerEventResult::Forward),
             Event::Stop => Ok(BrokerEventResult::Forward),
             //_ => Ok(BrokerEventResult::Forward),
         }

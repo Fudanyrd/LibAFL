@@ -11,22 +11,28 @@ use core::{
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 
-use libafl_bolts::{serdeany::SerdeAnyMap, HasLen};
+use libafl_bolts::{serdeany::SerdeAnyMap, ErrorBacktrace, HasLen};
 use serde::{Deserialize, Serialize};
 
 use super::Corpus;
-use crate::{corpus::CorpusId, Error, HasMetadata};
+use crate::{bitmap::Bitmap, corpus::CorpusId, state::HasCorpus, Error, HasMetadata};
 
 /// Shorthand to receive a [`Ref`] or [`RefMut`] to a stored [`Testcase`], by [`CorpusId`].
 /// For a normal state, this should return a [`Testcase`] in the corpus, not the objectives.
-pub trait HasTestcase<I> {
+pub trait HasTestcase: HasCorpus {
     /// Shorthand to receive a [`Ref`] to a stored [`Testcase`], by [`CorpusId`].
     /// For a normal state, this should return a [`Testcase`] in the corpus, not the objectives.
-    fn testcase(&self, id: CorpusId) -> Result<Ref<Testcase<I>>, Error>;
+    fn testcase(
+        &self,
+        id: CorpusId,
+    ) -> Result<Ref<Testcase<<Self::Corpus as Corpus>::Input>>, Error>;
 
     /// Shorthand to receive a [`RefMut`] to a stored [`Testcase`], by [`CorpusId`].
     /// For a normal state, this should return a [`Testcase`] in the corpus, not the objectives.
-    fn testcase_mut(&self, id: CorpusId) -> Result<RefMut<Testcase<I>>, Error>;
+    fn testcase_mut(
+        &self,
+        id: CorpusId,
+    ) -> Result<RefMut<Testcase<<Self::Corpus as Corpus>::Input>>, Error>;
 }
 
 /// An entry in the [`Testcase`] Corpus
@@ -54,6 +60,8 @@ pub struct Testcase<I> {
     parent_id: Option<CorpusId>,
     /// If the testcase is "disabled"
     disabled: bool,
+    /// If the test case is scheduled by setcover.
+    use_setcover: bool,
     /// has found crash (or timeout) or not
     objectives_found: usize,
     /// Vector of `Feedback` names that deemed this `Testcase` as corpus worthy
@@ -62,6 +70,9 @@ pub struct Testcase<I> {
     /// Vector of `Feedback` names that deemed this `Testcase` as solution worthy
     #[cfg(feature = "track_hit_feedbacks")]
     hit_objectives: Vec<Cow<'static, str>>,
+    /// frontier node bitmap(optional)
+    frontier_node_bitmap: Option<Bitmap>,
+    covered_frontier_nodes: u32,
 }
 
 impl<I> HasMetadata for Testcase<I> {
@@ -81,7 +92,7 @@ impl<I> HasMetadata for Testcase<I> {
 /// Impl of a testcase
 impl<I> Testcase<I> {
     /// Returns this [`Testcase`] with a loaded `Input`]
-    pub fn load_input<C: Corpus<I>>(&mut self, corpus: &C) -> Result<&I, Error> {
+    pub fn load_input<C: Corpus<Input = I>>(&mut self, corpus: &C) -> Result<&I, Error> {
         corpus.load_input_into(self)?;
         Ok(self.input.as_ref().unwrap())
     }
@@ -231,11 +242,14 @@ impl<I> Testcase<I> {
             scheduled_count: 0,
             parent_id: None,
             disabled: false,
+            use_setcover: false,
             objectives_found: 0,
             #[cfg(feature = "track_hit_feedbacks")]
             hit_feedbacks: Vec::new(),
             #[cfg(feature = "track_hit_feedbacks")]
             hit_objectives: Vec::new(),
+            frontier_node_bitmap: None,
+            covered_frontier_nodes: 0,
         }
     }
 
@@ -255,11 +269,14 @@ impl<I> Testcase<I> {
             scheduled_count: 0,
             parent_id: Some(parent_id),
             disabled: false,
+            use_setcover: false,
             objectives_found: 0,
             #[cfg(feature = "track_hit_feedbacks")]
             hit_feedbacks: Vec::new(),
             #[cfg(feature = "track_hit_feedbacks")]
             hit_objectives: Vec::new(),
+            frontier_node_bitmap: None,
+            covered_frontier_nodes: 0,
         }
     }
 
@@ -279,11 +296,14 @@ impl<I> Testcase<I> {
             scheduled_count: 0,
             parent_id: None,
             disabled: false,
+            use_setcover: false,
             objectives_found: 0,
             #[cfg(feature = "track_hit_feedbacks")]
             hit_feedbacks: Vec::new(),
             #[cfg(feature = "track_hit_feedbacks")]
             hit_objectives: Vec::new(),
+            frontier_node_bitmap: None,
+            covered_frontier_nodes: 0,
         }
     }
 
@@ -312,6 +332,74 @@ impl<I> Testcase<I> {
     pub fn found_objective(&mut self) {
         self.objectives_found = self.objectives_found.saturating_add(1);
     }
+
+    /// Use the setcover reduction method.
+    pub fn use_setcover_schedule(&mut self) -> Result<(), Error> {
+        if self.use_setcover {
+            return Ok(());
+        }
+
+        self.use_setcover = true;
+        self.frontier_node_bitmap = Some(Bitmap::new(crate::state::MAP_SIZE));
+        return Ok(());
+    }
+
+    /// Get the bitmap of frontier nodes
+    pub fn frontier_node_bitmap(&self) -> Result<&Bitmap, Error> {
+        if self.frontier_node_bitmap == None {
+            return Err(Error::Unsupported(
+                "Setcover schedule is not supported for OnDiskCorpus".into(),
+                ErrorBacktrace::new(),
+            ));
+        } else {
+            return Ok(self.frontier_node_bitmap.as_ref().unwrap());
+        }
+    }
+
+    /// Get the bitmap of frontier nodes (mutable)
+    pub fn frontier_node_bitmap_mut(&mut self) -> Result<&mut Bitmap, Error> {
+        if self.frontier_node_bitmap == None {
+            return Err(Error::Unsupported(
+                "Setcover schedule is not supported for OnDiskCorpus".into(),
+                ErrorBacktrace::new(),
+            ));
+        } else {
+            return Ok(self.frontier_node_bitmap.as_mut().unwrap());
+        }
+    }
+
+    /// Get the number of frontier nodes that are covered
+    pub fn covered_frontier_nodes_count(&self) -> Result<u32, Error> {
+        if self.use_setcover {
+            return Ok(self.covered_frontier_nodes);
+        } else {
+            return Err(Error::Unsupported(
+                "Setcover schedule is not supported for OnDiskCorpus".into(),
+                ErrorBacktrace::new(),
+            ));
+        }
+    }
+
+    /// Set the number of frontier nodes that are covered
+    pub fn set_covered_frontier_nodes_count(&mut self, count: u32) -> Result<(), Error> {
+        if self.use_setcover {
+            self.covered_frontier_nodes = count;
+            return Ok(());
+        } else {
+            return Err(Error::Unsupported(
+                "Setcover schedule is not supported for OnDiskCorpus".into(),
+                ErrorBacktrace::new(),
+            ));
+        }
+    }
+
+    /// Get whether to trace bytes.
+    pub fn trace_mini(&self) -> Result<bool, Error> {
+        Err(Error::Unsupported(
+            "Setcover schedule is not supported for OnDiskCorpus".into(),
+            ErrorBacktrace::new(),
+        ))
+    }
 }
 
 impl<I> Default for Testcase<I> {
@@ -336,6 +424,9 @@ impl<I> Default for Testcase<I> {
             hit_feedbacks: Vec::new(),
             #[cfg(feature = "track_hit_feedbacks")]
             hit_objectives: Vec::new(),
+            use_setcover: false,
+            frontier_node_bitmap: None,
+            covered_frontier_nodes: 0,
         }
     }
 }
@@ -352,7 +443,7 @@ where
     }
 
     /// Get the `len` or calculate it, if not yet calculated.
-    pub fn load_len<C: Corpus<I>>(&mut self, corpus: &C) -> Result<usize, Error> {
+    pub fn load_len<C: Corpus<Input = I>>(&mut self, corpus: &C) -> Result<usize, Error> {
         match &self.input {
             Some(i) => {
                 let l = i.len();

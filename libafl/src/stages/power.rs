@@ -11,9 +11,10 @@ use libafl_bolts::Named;
 #[cfg(feature = "introspection")]
 use crate::monitors::PerfFeature;
 use crate::{
-    corpus::HasCurrentCorpusId,
+    corpus::{Corpus, HasCurrentCorpusId},
     executors::{Executor, HasObservers},
     fuzzer::Evaluator,
+    inputs::{Input, UsesInput},
     mark_feature_time,
     mutators::{MutationResult, Mutator},
     schedulers::{testcase_score::CorpusPowerTestcaseScore, TestcaseScore},
@@ -22,7 +23,9 @@ use crate::{
         MutationalStage, RetryCountRestartHelper, Stage,
     },
     start_timer,
-    state::{HasCurrentTestcase, HasExecutions, HasRand, MaybeHasClientPerfMonitor},
+    state::{
+        HasCorpus, HasCurrentTestcase, HasExecutions, HasRand, MaybeHasClientPerfMonitor, UsesState,
+    },
     Error, HasMetadata, HasNamedMetadata,
 };
 
@@ -47,8 +50,8 @@ impl<E, F, EM, I, M, S, Z> Named for PowerMutationalStage<E, F, EM, I, M, S, Z> 
 
 impl<E, F, EM, I, M, S, Z> MutationalStage<S> for PowerMutationalStage<E, F, EM, I, M, S, Z>
 where
-    S: HasCurrentTestcase<I>,
-    F: TestcaseScore<I, S>,
+    S: HasCurrentTestcase,
+    F: TestcaseScore<S>,
 {
     type Mutator = M;
     /// The mutator, added to this stage
@@ -76,18 +79,22 @@ where
 
 impl<E, F, EM, I, M, S, Z> Stage<E, EM, S, Z> for PowerMutationalStage<E, F, EM, I, M, S, Z>
 where
-    E: Executor<EM, I, S, Z> + HasObservers,
-    F: TestcaseScore<I, S>,
+    E: Executor<EM, Z, State = S> + HasObservers,
+    EM: UsesState<State = S>,
+    F: TestcaseScore<S>,
     M: Mutator<I, S>,
-    S: HasMetadata
+    S: HasCorpus
+        + HasMetadata
         + HasRand
         + HasExecutions
         + HasNamedMetadata
-        + HasCurrentTestcase<I>
+        + HasCurrentTestcase
         + HasCurrentCorpusId
-        + MaybeHasClientPerfMonitor,
-    Z: Evaluator<E, EM, I, S>,
-    I: MutatedTransform<I, S> + Clone,
+        + MaybeHasClientPerfMonitor
+        + UsesInput<Input = <S::Corpus as Corpus>::Input>,
+    Z: Evaluator<E, EM, <S::Corpus as Corpus>::Input, S>,
+    I: MutatedTransform<<S::Corpus as Corpus>::Input, S> + Clone + Input,
+    <S::Corpus as Corpus>::Input: Input,
 {
     #[inline]
     #[expect(clippy::let_and_return)]
@@ -114,12 +121,20 @@ where
 
 impl<E, F, EM, I, M, S, Z> PowerMutationalStage<E, F, EM, I, M, S, Z>
 where
-    E: Executor<EM, I, S, Z> + HasObservers,
-    F: TestcaseScore<I, S>,
+    E: Executor<EM, Z, State = S> + HasObservers,
+    EM: UsesState<State = S>,
+    F: TestcaseScore<S>,
+    I: Input,
     M: Mutator<I, S>,
-    S: HasMetadata + HasRand + HasCurrentTestcase<I> + MaybeHasClientPerfMonitor,
-    I: MutatedTransform<I, S> + Clone,
-    Z: Evaluator<E, EM, I, S>,
+    S: HasCorpus
+        + HasMetadata
+        + HasRand
+        + HasCurrentTestcase
+        + MaybeHasClientPerfMonitor
+        + UsesInput<Input = <S::Corpus as Corpus>::Input>,
+    I: MutatedTransform<<S::Corpus as Corpus>::Input, S> + Clone + Input,
+    Z: Evaluator<E, EM, <S::Corpus as Corpus>::Input, S>,
+    <S::Corpus as Corpus>::Input: Input,
 {
     /// Creates a new [`PowerMutationalStage`]
     pub fn new(mutator: M) -> Self {
@@ -176,7 +191,7 @@ where
 
             let (untransformed, post) = input.try_transform_into(state)?;
             let (_, corpus_id) =
-                fuzzer.evaluate_filtered(state, executor, manager, &untransformed)?;
+                fuzzer.evaluate_filtered(state, executor, manager, untransformed)?;
 
             start_timer!(state);
             self.mutator_mut().post_exec(state, corpus_id)?;

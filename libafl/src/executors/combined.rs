@@ -8,6 +8,7 @@ use libafl_bolts::tuples::RefIndexable;
 use super::HasTimeout;
 use crate::{
     executors::{Executor, ExitKind, HasObservers},
+    state::{HasExecutions, UsesState},
     Error,
 };
 
@@ -20,7 +21,12 @@ pub struct CombinedExecutor<A, B> {
 
 impl<A, B> CombinedExecutor<A, B> {
     /// Create a new `CombinedExecutor`, wrapping the given `executor`s.
-    pub fn new(primary: A, secondary: B) -> Self {
+    pub fn new<EM, Z>(primary: A, secondary: B) -> Self
+    where
+        A: Executor<EM, Z>,
+        B: Executor<EM, Z, State = <Self as UsesState>::State>,
+        EM: UsesState<State = <Self as UsesState>::State>,
+    {
         Self { primary, secondary }
     }
 
@@ -35,17 +41,19 @@ impl<A, B> CombinedExecutor<A, B> {
     }
 }
 
-impl<A, B, EM, I, S, Z> Executor<EM, I, S, Z> for CombinedExecutor<A, B>
+impl<A, B, EM, Z> Executor<EM, Z> for CombinedExecutor<A, B>
 where
-    A: Executor<EM, I, S, Z>,
-    B: Executor<EM, I, S, Z>,
+    A: Executor<EM, Z>,
+    B: Executor<EM, Z, State = <Self as UsesState>::State>,
+    Self::State: HasExecutions,
+    EM: UsesState<State = <Self as UsesState>::State>,
 {
     fn run_target(
         &mut self,
         fuzzer: &mut Z,
-        state: &mut S,
+        state: &mut Self::State,
         mgr: &mut EM,
-        input: &I,
+        input: &Self::Input,
     ) -> Result<ExitKind, Error> {
         self.primary.run_target(fuzzer, state, mgr, input)
     }
@@ -70,6 +78,13 @@ where
         );
         self.primary.timeout()
     }
+}
+
+impl<A, B> UsesState for CombinedExecutor<A, B>
+where
+    A: UsesState,
+{
+    type State = A::State;
 }
 
 impl<A, B> HasObservers for CombinedExecutor<A, B>

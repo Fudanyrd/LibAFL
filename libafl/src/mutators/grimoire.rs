@@ -4,7 +4,6 @@
 use alloc::{borrow::Cow, vec::Vec};
 use core::{
     cmp::{max, min},
-    marker::PhantomData,
     num::NonZero,
 };
 
@@ -26,13 +25,13 @@ const RECURSIVE_REPLACEMENT_DEPTH: [usize; 6] = [2, 4, 8, 16, 32, 64];
 const MAX_RECURSIVE_REPLACEMENT_LEN: usize = 64 << 10;
 const CHOOSE_SUBINPUT_PROB: f64 = 0.5;
 
-fn extend_with_random_generalized<I, S>(
+fn extend_with_random_generalized<S>(
     state: &mut S,
     items: &mut Vec<GeneralizedItem>,
     gap_indices: &mut Vec<usize>,
 ) -> Result<MutationResult, Error>
 where
-    S: HasMetadata + HasRand + HasCorpus<I>,
+    S: HasMetadata + HasRand + HasCorpus,
 {
     let id = random_corpus_id!(state.corpus(), state.rand_mut());
 
@@ -117,14 +116,13 @@ where
 
 /// Extend the generalized input with another random one from the corpus
 #[derive(Debug, Default)]
-pub struct GrimoireExtensionMutator<I> {
+pub struct GrimoireExtensionMutator {
     gap_indices: Vec<usize>,
-    phantom: PhantomData<I>,
 }
 
-impl<I, S> Mutator<GeneralizedInputMetadata, S> for GrimoireExtensionMutator<I>
+impl<S> Mutator<GeneralizedInputMetadata, S> for GrimoireExtensionMutator
 where
-    S: HasMetadata + HasRand + HasCorpus<I>,
+    S: HasMetadata + HasRand + HasCorpus,
 {
     fn mutate(
         &mut self,
@@ -139,35 +137,33 @@ where
     }
 }
 
-impl<I> Named for GrimoireExtensionMutator<I> {
+impl Named for GrimoireExtensionMutator {
     fn name(&self) -> &Cow<'static, str> {
         static NAME: Cow<'static, str> = Cow::Borrowed("GrimoireExtensionMutator");
         &NAME
     }
 }
 
-impl<I> GrimoireExtensionMutator<I> {
+impl GrimoireExtensionMutator {
     /// Creates a new [`GrimoireExtensionMutator`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             gap_indices: vec![],
-            phantom: PhantomData,
         }
     }
 }
 
 /// Extend the generalized input with another random one from the corpus
 #[derive(Debug, Default)]
-pub struct GrimoireRecursiveReplacementMutator<I> {
+pub struct GrimoireRecursiveReplacementMutator {
     scratch: Vec<GeneralizedItem>,
     gap_indices: Vec<usize>,
-    phantom: PhantomData<I>,
 }
 
-impl<I, S> Mutator<GeneralizedInputMetadata, S> for GrimoireRecursiveReplacementMutator<I>
+impl<S> Mutator<GeneralizedInputMetadata, S> for GrimoireRecursiveReplacementMutator
 where
-    S: HasMetadata + HasRand + HasCorpus<I>,
+    S: HasMetadata + HasRand + HasCorpus,
 {
     fn mutate(
         &mut self,
@@ -219,34 +215,31 @@ where
     }
 }
 
-impl<I> Named for GrimoireRecursiveReplacementMutator<I> {
+impl Named for GrimoireRecursiveReplacementMutator {
     fn name(&self) -> &Cow<'static, str> {
         static NAME: Cow<'static, str> = Cow::Borrowed("GrimoireRecursiveReplacementMutator");
         &NAME
     }
 }
 
-impl<I> GrimoireRecursiveReplacementMutator<I> {
+impl GrimoireRecursiveReplacementMutator {
     /// Creates a new [`GrimoireRecursiveReplacementMutator`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             scratch: vec![],
             gap_indices: vec![],
-            phantom: PhantomData,
         }
     }
 }
 
 /// Replace matching tokens with others from the tokens metadata
 #[derive(Debug, Default)]
-pub struct GrimoireStringReplacementMutator<I> {
-    phantom: PhantomData<I>,
-}
+pub struct GrimoireStringReplacementMutator {}
 
-impl<I, S> Mutator<GeneralizedInputMetadata, S> for GrimoireStringReplacementMutator<I>
+impl<S> Mutator<GeneralizedInputMetadata, S> for GrimoireStringReplacementMutator
 where
-    S: HasMetadata + HasRand + HasCorpus<I>,
+    S: HasMetadata + HasRand + HasCorpus,
 {
     fn mutate(
         &mut self,
@@ -343,33 +336,30 @@ where
     }
 }
 
-impl<I> Named for GrimoireStringReplacementMutator<I> {
+impl Named for GrimoireStringReplacementMutator {
     fn name(&self) -> &Cow<'static, str> {
         static NAME: Cow<'static, str> = Cow::Borrowed("GrimoireStringReplacementMutator");
         &NAME
     }
 }
 
-impl<I> GrimoireStringReplacementMutator<I> {
+impl GrimoireStringReplacementMutator {
     /// Creates a new [`GrimoireExtensionMutator`].
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            phantom: PhantomData,
-        }
+        Self::default()
     }
 }
 
 /// Randomly delete a part of the generalized input
 #[derive(Debug, Default)]
-pub struct GrimoireRandomDeleteMutator<I> {
+pub struct GrimoireRandomDeleteMutator {
     gap_indices: Vec<usize>,
-    phantom: PhantomData<I>,
 }
 
-impl<I, S> Mutator<GeneralizedInputMetadata, S> for GrimoireRandomDeleteMutator<I>
+impl<S> Mutator<GeneralizedInputMetadata, S> for GrimoireRandomDeleteMutator
 where
-    S: HasMetadata + HasRand + HasCorpus<I>,
+    S: HasMetadata + HasRand + HasCorpus,
 {
     fn mutate(
         &mut self,
@@ -410,20 +400,19 @@ where
     }
 }
 
-impl<I> Named for GrimoireRandomDeleteMutator<I> {
+impl Named for GrimoireRandomDeleteMutator {
     fn name(&self) -> &Cow<'static, str> {
         static NAME: Cow<'static, str> = Cow::Borrowed("GrimoireRandomDeleteMutator");
         &NAME
     }
 }
 
-impl<I> GrimoireRandomDeleteMutator<I> {
+impl GrimoireRandomDeleteMutator {
     /// Creates a new [`GrimoireExtensionMutator`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             gap_indices: vec![],
-            phantom: PhantomData,
         }
     }
 }

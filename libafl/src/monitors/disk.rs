@@ -230,3 +230,138 @@ where
         self.base.display(event_msg, sender_id);
     }
 }
+
+#[derive(Debug, Clone)]
+/// Wraps a base monitor and continuously appends
+/// the current statistics to a CSV file.
+pub struct OnDiskCSVMonitor<M>
+where
+    M: Monitor,
+{
+    base: M,
+    fobj: *mut File,
+    last_update: Duration,
+    update_interval: Duration,
+}
+
+impl<M> OnDiskCSVMonitor<M>
+where
+    M: Monitor,
+{
+    /// Create new [`OnDiskCSVMonitor`]
+    #[must_use]
+    pub fn new(fileptr: *mut File, base: M) -> Self {
+        Self::with_update_interval(fileptr, base, Duration::from_secs(60))
+    }
+
+    /// Create new [`OnDiskCSVMonitor`] with custom update interval
+    #[must_use]
+    pub fn with_update_interval(fileptr: *mut File, base: M, update_interval: Duration) -> Self {
+        if fileptr == std::ptr::null_mut() {
+            panic!("File pointer is null");
+        }
+
+        if true {
+            // write csv header.
+            // run time, corpus id, corpus size, objective size, executions, execs_per_sec, coverage
+            let mut fileref = unsafe { fileptr.as_ref().unwrap() };
+            writeln!(
+                fileref,
+                "run_time,corpus_id,corpus_size,fast_corpus_size,objective_size,executions,execs_per_sec,coverage"
+            )
+            .expect("Failed to write to the CSV file");
+
+            fileref.sync_all().expect("Failed to sync the CSV file");
+        }
+
+        Self {
+            base,
+            fobj: fileptr,
+            last_update: current_time() - update_interval,
+            update_interval,
+        }
+    }
+}
+
+impl<M> Monitor for OnDiskCSVMonitor<M>
+where
+    M: Monitor,
+{
+    /// The client monitor, mutable
+    fn client_stats_mut(&mut self) -> &mut Vec<ClientStats> {
+        self.base.client_stats_mut()
+    }
+
+    /// The client monitor
+    fn client_stats(&self) -> &[ClientStats] {
+        self.base.client_stats()
+    }
+
+    /// Time this fuzzing run stated
+    fn start_time(&self) -> Duration {
+        self.base.start_time()
+    }
+
+    /// Set creation time
+    fn set_start_time(&mut self, time: Duration) {
+        self.base.set_start_time(time);
+    }
+
+    fn aggregate(&mut self, name: &str) {
+        self.base.aggregate(name);
+    }
+
+    fn display(&mut self, event_msg: &str, sender_id: ClientId) {
+        let cur_time = current_time();
+        let run_time = cur_time - self.start_time();
+
+        let fileptr = self.fobj;
+        let mut fileref = unsafe { fileptr.as_ref().unwrap() };
+
+        if cur_time - self.last_update >= self.update_interval {
+            self.last_update = cur_time;
+
+            let clients = self.client_stats_mut();
+
+            for (i, client) in clients.iter_mut().enumerate() {
+                let exec_sec = client.execs_per_sec(cur_time);
+
+                // run time as H:M:S
+                let secs = run_time.as_secs();
+                write!(
+                    fileref,
+                    "\"{}:{}:{}\", ",
+                    secs / 3600,
+                    secs % 3600 / 60,
+                    secs % 60
+                )
+                .expect("Failed to write to the csv file");
+
+                // corpus id, corpus size, objective size, executions, execs_per_sec, coverage
+                write!(
+                    fileref,
+                    "{}, {}, {}, {}, {}, {}, ",
+                    i, client.corpus_size, client.fast_corpus_size, client.objective_size, client.executions, exec_sec
+                )
+                .expect("Failed to write to the csv file");
+
+                let mut pair_cnt = 0;
+                for (_key, val) in &client.user_monitor {
+                    write!(fileref, "\"{val}\", ").expect("Failed to write to the csv file");
+                    pair_cnt += 1;
+                }
+
+                if pair_cnt == 0 {
+                    // no coverage info found
+                    write!(fileref, "\"???\", ").expect("Failed to write to the csv file");
+                }
+
+                write!(fileref, "\n").expect("Failed to write to the csv file");
+
+                fileref.sync_all().expect("Failed to sync the csv file");
+            }
+        }
+
+        self.base.display(event_msg, sender_id);
+    }
+}

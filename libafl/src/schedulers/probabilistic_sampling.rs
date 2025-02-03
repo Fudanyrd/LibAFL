@@ -63,10 +63,10 @@ impl<F> ProbabilitySamplingScheduler<F> {
     }
 
     /// Calculate the score and store in `ProbabilityMetadata`
-    pub fn store_probability<I, S>(&self, state: &mut S, id: CorpusId) -> Result<(), Error>
+    pub fn store_probability<S>(&self, state: &mut S, id: CorpusId) -> Result<(), Error>
     where
-        F: TestcaseScore<I, S>,
-        S: HasCorpus<I> + HasMetadata + HasRand,
+        F: TestcaseScore<S>,
+        S: HasCorpus + HasMetadata + HasRand,
     {
         let prob = F::compute(state, &mut *state.corpus().get(id)?.borrow_mut())?;
         debug_assert!(
@@ -83,16 +83,16 @@ impl<F> ProbabilitySamplingScheduler<F> {
     }
 }
 
-impl<F, I, S> RemovableScheduler<I, S> for ProbabilitySamplingScheduler<F>
+impl<F, S> RemovableScheduler<<S::Corpus as Corpus>::Input, S> for ProbabilitySamplingScheduler<F>
 where
-    F: TestcaseScore<I, S>,
-    S: HasCorpus<I> + HasMetadata + HasRand,
+    F: TestcaseScore<S>,
+    S: HasCorpus + HasMetadata + HasRand,
 {
     fn on_remove(
         &mut self,
         state: &mut S,
         id: CorpusId,
-        _testcase: &Option<Testcase<I>>,
+        _testcase: &Option<Testcase<<S::Corpus as Corpus>::Input>>,
     ) -> Result<(), Error> {
         let meta = state
             .metadata_map_mut()
@@ -108,7 +108,7 @@ where
         &mut self,
         state: &mut S,
         id: CorpusId,
-        _prev: &Testcase<I>,
+        _prev: &Testcase<<S::Corpus as Corpus>::Input>,
     ) -> Result<(), Error> {
         let meta = state
             .metadata_map_mut()
@@ -122,10 +122,10 @@ where
     }
 }
 
-impl<F, I, S> Scheduler<I, S> for ProbabilitySamplingScheduler<F>
+impl<F, S> Scheduler<<S::Corpus as Corpus>::Input, S> for ProbabilitySamplingScheduler<F>
 where
-    F: TestcaseScore<I, S>,
-    S: HasCorpus<I> + HasMetadata + HasRand,
+    F: TestcaseScore<S>,
+    S: HasCorpus + HasMetadata + HasRand,
 {
     fn on_add(&mut self, state: &mut S, id: CorpusId) -> Result<(), Error> {
         let current_id = *state.corpus().current();
@@ -202,11 +202,14 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct UniformDistribution {}
 
-    impl<I, S> TestcaseScore<I, S> for UniformDistribution
+    impl<S> TestcaseScore<S> for UniformDistribution
     where
-        S: HasCorpus<I>,
+        S: HasCorpus,
     {
-        fn compute(_state: &S, _: &mut Testcase<I>) -> Result<f64, Error> {
+        fn compute(
+            _state: &S,
+            _: &mut Testcase<<S::Corpus as Corpus>::Input>,
+        ) -> Result<f64, Error> {
             Ok(FACTOR)
         }
     }

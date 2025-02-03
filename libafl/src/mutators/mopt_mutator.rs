@@ -371,7 +371,7 @@ pub struct StdMOptMutator<MT> {
 impl<I, MT, S> Mutator<I, S> for StdMOptMutator<MT>
 where
     MT: MutatorsTuple<I, S>,
-    S: HasRand + HasMetadata + HasCorpus<I> + HasSolutions<I>,
+    S: HasRand + HasMetadata + HasCorpus + HasSolutions,
 {
     #[inline]
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -519,7 +519,7 @@ impl<MT> StdMOptMutator<MT> {
     }
     fn core_mutate<I, S>(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error>
     where
-        S: HasMetadata + HasRand + HasSolutions<I> + HasCorpus<I>,
+        S: HasMetadata + HasRand + HasSolutions + HasCorpus,
         MT: MutatorsTuple<I, S>,
     {
         let mut r = MutationResult::Skipped;
@@ -546,7 +546,7 @@ impl<MT> StdMOptMutator<MT> {
 
     fn pilot_mutate<I, S>(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error>
     where
-        S: HasMetadata + HasRand + HasSolutions<I> + HasCorpus<I>,
+        S: HasMetadata + HasRand + HasSolutions + HasCorpus,
         MT: MutatorsTuple<I, S>,
     {
         let mut r = MutationResult::Skipped;
@@ -604,11 +604,11 @@ impl<MT> Named for StdMOptMutator<MT> {
 impl<I, MT, S> ScheduledMutator<I, S> for StdMOptMutator<MT>
 where
     MT: MutatorsTuple<I, S>,
-    S: HasRand + HasMetadata + HasCorpus<I> + HasSolutions<I>,
+    S: HasRand + HasMetadata + HasCorpus + HasSolutions,
 {
     /// Compute the number of iterations used to apply stacked mutations
     fn iterations(&self, state: &mut S, _: &I) -> u64 {
-        1 << (1 + state.rand_mut().below_or_zero(self.max_stack_pow))
+        1 << (1 + state.rand_mut().zero_upto(self.max_stack_pow))
     }
 
     /// Get the next mutation to apply

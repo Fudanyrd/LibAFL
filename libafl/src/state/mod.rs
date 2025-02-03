@@ -7,13 +7,17 @@ use core::{
     cell::{Ref, RefMut},
     fmt::Debug,
     marker::PhantomData,
+    ops::{Deref, DerefMut},
     time::Duration,
 };
+use std::io::BufRead;
 #[cfg(feature = "std")]
 use std::{
     fs,
     path::{Path, PathBuf},
 };
+
+use crate::bitmap::{getrand64, popcount8};
 
 #[cfg(feature = "std")]
 use libafl_bolts::core_affinity::{CoreId, Cores};
@@ -26,15 +30,18 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 mod stack;
 pub use stack::StageStack;
 
+use crate::bitmap::Bitmap;
 #[cfg(feature = "introspection")]
 use crate::monitors::ClientPerfMonitor;
+#[cfg(feature = "scalability_introspection")]
+use crate::monitors::ScalabilityMonitor;
 use crate::{
     corpus::{Corpus, CorpusId, HasCurrentCorpusId, HasTestcase, InMemoryCorpus, Testcase},
     events::{Event, EventFirer, LogSeverity},
     feedbacks::StateInitializer,
     fuzzer::{Evaluator, ExecuteInputResult},
     generators::Generator,
-    inputs::{Input, NopInput},
+    inputs::{Input, NopInput, UsesInput},
     stages::{HasCurrentStageId, HasNestedStageStatus, StageId},
     Error, HasMetadata, HasNamedMetadata,
 };
@@ -42,10 +49,51 @@ use crate::{
 /// The maximum size of a testcase
 pub const DEFAULT_MAX_SIZE: usize = 1_048_576;
 
+/// map size
+pub const MAP_SIZE: usize = 1 << 16;
+
+/// successor size
+pub const MAX_SUCCESSOR_COUNT: usize = 1024;
+
+/// max node per seed
+pub const MAX_NODE_PER_SEED: usize = 1000;
+
+/// default execution time: 0.5s
+pub const DEFAULT_EXEC_TIME_US: f64 = 500_000.0;
+
+/// The [`State`] of the fuzzer.
+/// Contains all important information about the current run.
+/// Will be used to restart the fuzzing process at any time.
+pub trait State:
+    UsesInput
+    + Serialize
+    + DeserializeOwned
+    + MaybeHasClientPerfMonitor
+    + MaybeHasScalabilityMonitor
+    + HasCurrentCorpusId
+    + HasCurrentStageId
+    + Stoppable
+{
+}
+
+/// Structs which implement this trait are aware of the state. This is used for type enforcement.
+pub trait UsesState: UsesInput<Input = <Self::State as UsesInput>::Input> {
+    /// The state known by this type.
+    type State: State;
+}
+
+// blanket impl which automatically defines UsesInput for anything that implements UsesState
+impl<KS> UsesInput for KS
+where
+    KS: UsesState,
+{
+    type Input = <KS::State as UsesInput>::Input;
+}
+
 /// Trait for elements offering a corpus
-pub trait HasCorpus<I> {
+pub trait HasCorpus {
     /// The associated type implementing [`Corpus`].
-    type Corpus: Corpus<I>;
+    type Corpus: Corpus;
 
     /// The testcase corpus
     fn corpus(&self) -> &Self::Corpus;
@@ -53,30 +101,20 @@ pub trait HasCorpus<I> {
     fn corpus_mut(&mut self) -> &mut Self::Corpus;
 }
 
-/// The trait that implements the very standard capability of a state.
-/// This state contains important information about the current run
-/// and can be used to restart the fuzzing process at any time.
-///
-/// This [`State`] is here for documentation purpose.
-/// You should *NOT* implement this trait for any of your struct,
-/// but when you implement your customized state, you can look at this trait to see what would be needed.
-#[allow(dead_code)]
-trait State:
-    Serialize
-    + DeserializeOwned
-    + MaybeHasClientPerfMonitor
-    + HasCurrentCorpusId
-    + HasCurrentStageId
-    + Stoppable
-{
-}
-
-impl<C, I, R, SC> State for StdState<C, I, R, SC>
+// Reflexivity
+impl<C> HasCorpus for C
 where
-    C: Serialize + DeserializeOwned,
-    R: Rand,
-    SC: Serialize + DeserializeOwned,
+    C: Corpus,
 {
+    type Corpus = Self;
+
+    fn corpus(&self) -> &Self::Corpus {
+        self
+    }
+
+    fn corpus_mut(&mut self) -> &mut Self::Corpus {
+        self
+    }
 }
 
 /// Interact with the maximum size
@@ -88,9 +126,9 @@ pub trait HasMaxSize {
 }
 
 /// Trait for elements offering a corpus of solutions
-pub trait HasSolutions<I> {
+pub trait HasSolutions {
     /// The associated type implementing [`Corpus`] for solutions
-    type Solutions: Corpus<I>;
+    type Solutions: Corpus;
 
     /// The solutions corpus
     fn solutions(&self) -> &Self::Solutions;
@@ -131,6 +169,29 @@ impl<T> MaybeHasClientPerfMonitor for T {}
 
 #[cfg(feature = "introspection")]
 impl<T> MaybeHasClientPerfMonitor for T where T: HasClientPerfMonitor {}
+
+/// Intermediate trait for `HasScalabilityMonitor`
+#[cfg(feature = "scalability_introspection")]
+pub trait MaybeHasScalabilityMonitor: HasScalabilityMonitor {}
+/// Intermediate trait for `HasScalabilityMonitor`
+#[cfg(not(feature = "scalability_introspection"))]
+pub trait MaybeHasScalabilityMonitor {}
+
+#[cfg(not(feature = "scalability_introspection"))]
+impl<T> MaybeHasScalabilityMonitor for T {}
+
+#[cfg(feature = "scalability_introspection")]
+impl<T> MaybeHasScalabilityMonitor for T where T: HasScalabilityMonitor {}
+
+/// Trait for offering a [`ScalabilityMonitor`]
+#[cfg(feature = "scalability_introspection")]
+pub trait HasScalabilityMonitor {
+    /// Ref to [`ScalabilityMonitor`]
+    fn scalability_monitor(&self) -> &ScalabilityMonitor;
+
+    /// Mutable ref to [`ScalabilityMonitor`]
+    fn scalability_monitor_mut(&mut self) -> &mut ScalabilityMonitor;
+}
 
 /// Trait for the execution counter
 pub trait HasExecutions {
@@ -179,6 +240,41 @@ pub trait HasLastReportTime {
     fn last_report_time_mut(&mut self) -> &mut Option<Duration>;
 }
 
+/// Trait for set cover scheduling
+pub trait HasSetCover {
+    /// Load the cfg file. Environment variable
+    /// AFL_CFG_PATH must be set.
+    fn load_cfg(&mut self);
+
+    /// Change scheduling method to setcover.
+    fn use_setcover_schedule(&mut self);
+
+    /// Check if the edge is a frontier node.
+    fn is_frontier_node_outer(&self, edge_id: usize) -> bool;
+
+    /// Check if the edge is a frontier node.
+    fn is_frontier_node_inner(&self, trace_bits: &Vec<u8>, edge_id: usize) -> bool;
+
+    /// Update global frontier nodes.
+    fn update_global_frontier_nodes(&mut self, id: CorpusId);
+
+    /// Perform seed reduction.
+    fn setcover_reduction(&mut self);
+
+    /// Update bitmap score.
+    fn update_bitmap_score(&mut self, trace_bits: Vec<u8>, id: CorpusId);
+
+    /// Go over top rated entries and sequentially grab
+    /// winners for previously unseen bytes and marks
+    /// them as favored.
+    fn cull_queue(&mut self);
+
+    /// Write trace bits info to disk.
+    fn write_trace_bits_info(&self) {
+        panic!("not implemented yet");
+    }
+}
+
 /// Struct that holds the options for input loading
 #[cfg(feature = "std")]
 pub struct LoadConfig<'a, I, S, Z> {
@@ -204,7 +300,7 @@ impl<I, S, Z> Debug for LoadConfig<'_, I, S, Z> {
         SC: serde::Serialize + for<'a> serde::Deserialize<'a>,
         R: serde::Serialize + for<'a> serde::Deserialize<'a>
     ")]
-pub struct StdState<C, I, R, SC> {
+pub struct StdState<I, C, R, SC> {
     /// RNG instance
     rand: R,
     /// How many times the executor ran the harness/target
@@ -226,6 +322,8 @@ pub struct StdState<C, I, R, SC> {
     /// Performance statistics for this fuzzer
     #[cfg(feature = "introspection")]
     introspection_monitor: ClientPerfMonitor,
+    #[cfg(feature = "scalability_introspection")]
+    scalability_monitor: ScalabilityMonitor,
     #[cfg(feature = "std")]
     /// Remaining initial inputs to load, if any
     remaining_initial_files: Option<Vec<PathBuf>>,
@@ -248,9 +346,48 @@ pub struct StdState<C, I, R, SC> {
     stop_requested: bool,
     stage_stack: StageStack,
     phantom: PhantomData<I>,
+    /// needed by our setcover method.
+    global_frontier_bitmap: Bitmap,
+    initial_frontier_bitmap: Bitmap,
+    local_covered: Bitmap,
+    recent_frontier_count: u32,
+    global_covered_frontier_nodes_count: u32,
+    covered_seed_list_counter: u32,
+    covered_fast_seed_list_counter: u32,
+    use_setcover_scheduling: bool,
+    removed_frontier_found: bool,
+    new_frontier_found: bool,
+    global_frontier_updated: bool,
+    /// record changes of bitmap score
+    score_changed: bool,
+    /// forkserver
+    successor_map: Vec<Vec<u32>>,
+    successor_count: Vec<u32>,
+    virgin_bits: Vec<u8>,
+    /// Top entries for bitmap bytes
+    top_rated: Vec<Option<CorpusId>>,
+    // FIXME: These are probably unused.
+    // recent_frontier_nodes: Vec<u32>,
+    // frontier_discovery_time: Vec<u32>,
 }
 
-impl<C, I, R, SC> HasRand for StdState<C, I, R, SC>
+impl<I, C, R, SC> UsesInput for StdState<I, C, R, SC>
+where
+    I: Input,
+{
+    type Input = I;
+}
+
+impl<I, C, R, SC> State for StdState<I, C, R, SC>
+where
+    C: Corpus<Input = Self::Input> + Serialize + DeserializeOwned,
+    R: Rand,
+    SC: Corpus<Input = Self::Input> + Serialize + DeserializeOwned,
+    Self: UsesInput,
+{
+}
+
+impl<I, C, R, SC> HasRand for StdState<I, C, R, SC>
 where
     R: Rand,
 {
@@ -269,9 +406,9 @@ where
     }
 }
 
-impl<C, I, R, SC> HasCorpus<I> for StdState<C, I, R, SC>
+impl<I, C, R, SC> HasCorpus for StdState<I, C, R, SC>
 where
-    C: Corpus<I>,
+    C: Corpus,
 {
     type Corpus = C;
 
@@ -288,26 +425,25 @@ where
     }
 }
 
-impl<C, I, R, SC> HasTestcase<I> for StdState<C, I, R, SC>
+impl<I, C, R, SC> HasTestcase for StdState<I, C, R, SC>
 where
-    C: Corpus<I>,
+    C: Corpus,
 {
     /// To get the testcase
-    fn testcase(&self, id: CorpusId) -> Result<Ref<'_, Testcase<I>>, Error> {
+    fn testcase(&self, id: CorpusId) -> Result<Ref<'_, Testcase<C::Input>>, Error> {
         Ok(self.corpus().get(id)?.borrow())
     }
 
     /// To get mutable testcase
-    fn testcase_mut(&self, id: CorpusId) -> Result<RefMut<'_, Testcase<I>>, Error> {
+    fn testcase_mut(&self, id: CorpusId) -> Result<RefMut<'_, Testcase<C::Input>>, Error> {
         Ok(self.corpus().get(id)?.borrow_mut())
     }
 }
 
-impl<C, I, R, SC> HasSolutions<I> for StdState<C, I, R, SC>
+impl<I, C, R, SC> HasSolutions for StdState<I, C, R, SC>
 where
-    C: Corpus<I>,
     I: Input,
-    SC: Corpus<I>,
+    SC: Corpus<Input = <Self as UsesInput>::Input>,
 {
     type Solutions = SC;
 
@@ -324,7 +460,7 @@ where
     }
 }
 
-impl<C, I, R, SC> HasMetadata for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasMetadata for StdState<I, C, R, SC> {
     /// Get all the metadata into an [`hashbrown::HashMap`]
     #[inline]
     fn metadata_map(&self) -> &SerdeAnyMap {
@@ -338,7 +474,7 @@ impl<C, I, R, SC> HasMetadata for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasNamedMetadata for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasNamedMetadata for StdState<I, C, R, SC> {
     /// Get all the metadata into an [`hashbrown::HashMap`]
     #[inline]
     fn named_metadata_map(&self) -> &NamedSerdeAnyMap {
@@ -352,7 +488,7 @@ impl<C, I, R, SC> HasNamedMetadata for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasExecutions for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasExecutions for StdState<I, C, R, SC> {
     /// The executions counter
     #[inline]
     fn executions(&self) -> &u64 {
@@ -366,7 +502,7 @@ impl<C, I, R, SC> HasExecutions for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasImported for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasImported for StdState<I, C, R, SC> {
     /// Return the number of new paths that imported from other fuzzers
     #[inline]
     fn imported(&self) -> &usize {
@@ -380,7 +516,7 @@ impl<C, I, R, SC> HasImported for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasLastFoundTime for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasLastFoundTime for StdState<I, C, R, SC> {
     /// Return the number of new paths that imported from other fuzzers
     #[inline]
     fn last_found_time(&self) -> &Duration {
@@ -394,7 +530,7 @@ impl<C, I, R, SC> HasLastFoundTime for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasLastReportTime for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasLastReportTime for StdState<I, C, R, SC> {
     /// The last time we reported progress,if available/used.
     /// This information is used by fuzzer `maybe_report_progress`.
     fn last_report_time(&self) -> &Option<Duration> {
@@ -408,7 +544,7 @@ impl<C, I, R, SC> HasLastReportTime for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasMaxSize for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasMaxSize for StdState<I, C, R, SC> {
     fn max_size(&self) -> usize {
         self.max_size
     }
@@ -418,7 +554,7 @@ impl<C, I, R, SC> HasMaxSize for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasStartTime for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasStartTime for StdState<I, C, R, SC> {
     /// The starting time
     #[inline]
     fn start_time(&self) -> &Duration {
@@ -432,7 +568,7 @@ impl<C, I, R, SC> HasStartTime for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasCurrentCorpusId for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasCurrentCorpusId for StdState<I, C, R, SC> {
     fn set_corpus_id(&mut self, id: CorpusId) -> Result<(), Error> {
         self.corpus_id = Some(id);
         Ok(())
@@ -449,17 +585,20 @@ impl<C, I, R, SC> HasCurrentCorpusId for StdState<C, I, R, SC> {
 }
 
 /// Has information about the current [`Testcase`] we are fuzzing
-pub trait HasCurrentTestcase<I>: HasCorpus<I> {
+pub trait HasCurrentTestcase: HasCorpus {
     /// Gets the current [`Testcase`] we are fuzzing
     ///
     /// Will return [`Error::key_not_found`] if no `corpus_id` is currently set.
-    fn current_testcase(&self) -> Result<Ref<'_, Testcase<I>>, Error>;
+    fn current_testcase(&self)
+        -> Result<Ref<'_, Testcase<<Self::Corpus as Corpus>::Input>>, Error>;
     //fn current_testcase(&self) -> Result<&Testcase<I>, Error>;
 
     /// Gets the current [`Testcase`] we are fuzzing (mut)
     ///
     /// Will return [`Error::key_not_found`] if no `corpus_id` is currently set.
-    fn current_testcase_mut(&self) -> Result<RefMut<'_, Testcase<I>>, Error>;
+    fn current_testcase_mut(
+        &self,
+    ) -> Result<RefMut<'_, Testcase<<Self::Corpus as Corpus>::Input>>, Error>;
     //fn current_testcase_mut(&self) -> Result<&mut Testcase<I>, Error>;
 
     /// Gets a cloned representation of the current [`Testcase`].
@@ -469,15 +608,17 @@ pub trait HasCurrentTestcase<I>: HasCorpus<I> {
     /// # Note
     /// This allocates memory and copies the contents!
     /// For performance reasons, if you just need to access the testcase, use [`Self::current_testcase`] instead.
-    fn current_input_cloned(&self) -> Result<I, Error>;
+    fn current_input_cloned(&self) -> Result<<Self::Corpus as Corpus>::Input, Error>;
 }
 
-impl<I, T> HasCurrentTestcase<I> for T
+impl<T> HasCurrentTestcase for T
 where
-    T: HasCorpus<I> + HasCurrentCorpusId,
-    I: Clone,
+    T: HasCorpus + HasCurrentCorpusId,
+    <Self::Corpus as Corpus>::Input: Clone,
 {
-    fn current_testcase(&self) -> Result<Ref<'_, Testcase<I>>, Error> {
+    fn current_testcase(
+        &self,
+    ) -> Result<Ref<'_, Testcase<<Self::Corpus as Corpus>::Input>>, Error> {
         let Some(corpus_id) = self.current_corpus_id()? else {
             return Err(Error::key_not_found(
                 "We are not currently processing a testcase",
@@ -487,7 +628,9 @@ where
         Ok(self.corpus().get(corpus_id)?.borrow())
     }
 
-    fn current_testcase_mut(&self) -> Result<RefMut<'_, Testcase<I>>, Error> {
+    fn current_testcase_mut(
+        &self,
+    ) -> Result<RefMut<'_, Testcase<<Self::Corpus as Corpus>::Input>>, Error> {
         let Some(corpus_id) = self.current_corpus_id()? else {
             return Err(Error::illegal_state(
                 "We are not currently processing a testcase",
@@ -497,7 +640,7 @@ where
         Ok(self.corpus().get(corpus_id)?.borrow_mut())
     }
 
-    fn current_input_cloned(&self) -> Result<I, Error> {
+    fn current_input_cloned(&self) -> Result<<Self::Corpus as Corpus>::Input, Error> {
         let mut testcase = self.current_testcase_mut()?;
         Ok(testcase.borrow_mut().load_input(self.corpus())?.clone())
     }
@@ -515,7 +658,7 @@ pub trait Stoppable {
     fn discard_stop_request(&mut self);
 }
 
-impl<C, I, R, SC> Stoppable for StdState<C, I, R, SC> {
+impl<I, C, R, SC> Stoppable for StdState<I, C, R, SC> {
     fn request_stop(&mut self) {
         self.stop_requested = true;
     }
@@ -529,7 +672,7 @@ impl<C, I, R, SC> Stoppable for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasCurrentStageId for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasCurrentStageId for StdState<I, C, R, SC> {
     fn set_current_stage_id(&mut self, idx: StageId) -> Result<(), Error> {
         self.stage_stack.set_current_stage_id(idx)
     }
@@ -547,7 +690,7 @@ impl<C, I, R, SC> HasCurrentStageId for StdState<C, I, R, SC> {
     }
 }
 
-impl<C, I, R, SC> HasNestedStageStatus for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasNestedStageStatus for StdState<I, C, R, SC> {
     fn enter_inner_stage(&mut self) -> Result<(), Error> {
         self.stage_stack.enter_inner_stage()
     }
@@ -558,12 +701,12 @@ impl<C, I, R, SC> HasNestedStageStatus for StdState<C, I, R, SC> {
 }
 
 #[cfg(feature = "std")]
-impl<C, I, R, SC> StdState<C, I, R, SC>
+impl<C, I, R, SC> StdState<I, C, R, SC>
 where
-    C: Corpus<I>,
     I: Input,
+    C: Corpus<Input = <Self as UsesInput>::Input>,
     R: Rand,
-    SC: Corpus<I>,
+    SC: Corpus<Input = <Self as UsesInput>::Input>,
 {
     /// Decide if the state must load the inputs
     pub fn must_load_initial_inputs(&self) -> bool {
@@ -577,6 +720,7 @@ where
         loop {
             if let Some(path) = self.remaining_initial_files.as_mut().and_then(Vec::pop) {
                 let filename = path.file_name().unwrap().to_string_lossy();
+                println!("Loading initial input: {filename}");
                 if filename.starts_with('.')
                 // || filename
                 //     .rsplit_once('-')
@@ -655,7 +799,8 @@ where
         load_config: LoadConfig<I, Self, Z>,
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         if let Some(remaining) = self.remaining_initial_files.as_ref() {
@@ -679,22 +824,17 @@ where
         config: &mut LoadConfig<I, Self, Z>,
     ) -> Result<ExecuteInputResult, Error>
     where
-        EM: EventFirer<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
-        log::info!("Loading file {path:?} ...");
-        let input = match (config.loader)(fuzzer, self, path) {
-            Ok(input) => input,
-            Err(err) => {
-                log::error!("Skipping input that we could not load from {path:?}: {err:?}");
-                return Ok(ExecuteInputResult::None);
-            }
-        };
+        log::info!("Loading file {:?} ...", &path);
+        let input = (config.loader)(fuzzer, self, path)?;
         if config.forced {
             let _: CorpusId = fuzzer.add_input(self, executor, manager, input)?;
             Ok(ExecuteInputResult::Corpus)
         } else {
-            let (res, _) = fuzzer.evaluate_input(self, executor, manager, &input)?;
+            let (res, _) = fuzzer.evaluate_input(self, executor, manager, input.clone())?;
             if res == ExecuteInputResult::None {
                 fuzzer.add_disabled_input(self, input)?;
                 log::warn!("input {:?} was not interesting, adding as disabled.", &path);
@@ -713,7 +853,8 @@ where
         mut config: LoadConfig<I, Self, Z>,
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         loop {
@@ -777,7 +918,8 @@ where
         file_list: &[PathBuf],
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         self.load_initial_inputs_custom_by_filenames(
@@ -804,7 +946,8 @@ where
         in_dirs: &[PathBuf],
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         self.canonicalize_input_dirs(in_dirs)?;
@@ -830,7 +973,8 @@ where
         file_list: &[PathBuf],
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         self.load_initial_inputs_custom_by_filenames(
@@ -855,7 +999,8 @@ where
         in_dirs: &[PathBuf],
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         self.canonicalize_input_dirs(in_dirs)?;
@@ -881,7 +1026,8 @@ where
         in_dirs: &[PathBuf],
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         self.canonicalize_input_dirs(in_dirs)?;
@@ -922,7 +1068,8 @@ where
         cores: &Cores,
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         if self.multicore_inputs_processed.unwrap_or(false) {
@@ -999,12 +1146,12 @@ where
     }
 }
 
-impl<C, I, R, SC> StdState<C, I, R, SC>
+impl<C, I, R, SC> StdState<I, C, R, SC>
 where
-    C: Corpus<I>,
     I: Input,
+    C: Corpus<Input = <Self as UsesInput>::Input>,
     R: Rand,
-    SC: Corpus<I>,
+    SC: Corpus<Input = <Self as UsesInput>::Input>,
 {
     fn generate_initial_internal<G, E, EM, Z>(
         &mut self,
@@ -1016,8 +1163,9 @@ where
         forced: bool,
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
-        G: Generator<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
+        G: Generator<<Self as UsesInput>::Input, Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         let mut added = 0;
@@ -1027,7 +1175,7 @@ where
                 let _: CorpusId = fuzzer.add_input(self, executor, manager, input)?;
                 added += 1;
             } else {
-                let (res, _) = fuzzer.evaluate_input(self, executor, manager, &input)?;
+                let (res, _) = fuzzer.evaluate_input(self, executor, manager, input)?;
                 if res != ExecuteInputResult::None {
                     added += 1;
                 }
@@ -1054,8 +1202,9 @@ where
         num: usize,
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
-        G: Generator<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
+        G: Generator<<Self as UsesInput>::Input, Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         self.generate_initial_internal(fuzzer, executor, generator, manager, num, true)
@@ -1071,11 +1220,17 @@ where
         num: usize,
     ) -> Result<(), Error>
     where
-        EM: EventFirer<I, Self>,
-        G: Generator<I, Self>,
+        E: UsesState<State = Self>,
+        EM: EventFirer<State = Self>,
+        G: Generator<<Self as UsesInput>::Input, Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
         self.generate_initial_internal(fuzzer, executor, generator, manager, num, false)
+    }
+
+    /// Returns the map size.
+    pub fn get_map_size() -> usize {
+        return MAP_SIZE;
     }
 
     /// Creates a new `State`, taking ownership of all of the individual components during fuzzing.
@@ -1105,6 +1260,8 @@ where
             stop_requested: false,
             #[cfg(feature = "introspection")]
             introspection_monitor: ClientPerfMonitor::new(),
+            #[cfg(feature = "scalability_introspection")]
+            scalability_monitor: ScalabilityMonitor::new(),
             #[cfg(feature = "std")]
             remaining_initial_files: None,
             #[cfg(feature = "std")]
@@ -1116,6 +1273,22 @@ where
             phantom: PhantomData,
             #[cfg(feature = "std")]
             multicore_inputs_processed: None,
+            global_frontier_bitmap: Bitmap::new(MAP_SIZE),
+            initial_frontier_bitmap: Bitmap::new(MAP_SIZE),
+            local_covered: Bitmap::new(MAP_SIZE),
+            recent_frontier_count: 0,
+            global_covered_frontier_nodes_count: 0,
+            covered_fast_seed_list_counter: 0,
+            covered_seed_list_counter: 0,
+            new_frontier_found: false,
+            removed_frontier_found: false,
+            global_frontier_updated: false,
+            use_setcover_scheduling: false,
+            score_changed: false,
+            successor_map: vec![],   // init in load_cfg()
+            successor_count: vec![], // init in load_cfg()
+            virgin_bits: vec![],     // init in use_setcover_schedule()
+            top_rated: vec![None; MAP_SIZE],
         };
         feedback.init_state(&mut state)?;
         objective.init_state(&mut state)?;
@@ -1123,16 +1296,443 @@ where
     }
 }
 
-impl StdState<InMemoryCorpus<NopInput>, NopInput, StdRand, InMemoryCorpus<NopInput>> {
+impl<C, I, R, SC> HasSetCover for StdState<I, C, R, SC>
+where
+    I: Input,
+    C: Corpus<Input = <Self as UsesInput>::Input>,
+    R: Rand,
+    SC: Corpus<Input = <Self as UsesInput>::Input>,
+{
+    fn load_cfg(&mut self) {
+        self.successor_count = vec![0; MAP_SIZE];
+        for _i in 0..MAP_SIZE {
+            self.successor_map.push(vec![0; MAX_SUCCESSOR_COUNT]);
+        }
+
+        // load environment variable AFL_CFG_PATH
+        if let Ok(cfg_path) = std::env::var("AFL_CFG_PATH") {
+            let cfg_path: &Path = Path::new(&cfg_path);
+            if cfg_path.exists() {
+                use alloc::string::String;
+                use std::fs::File;
+                use std::io::BufReader;
+                let cfg_file: File = File::open(cfg_path).unwrap();
+                let mut src: usize;
+                let mut dst: usize;
+
+                let mut buffer: String = String::new();
+                let mut reader: BufReader<File> = BufReader::new(cfg_file);
+                // while (fscanf(cfg_file, "%u %u") == 2)
+                loop {
+                    buffer.clear();
+                    let ret: Result<usize, std::io::Error> = reader.read_line(&mut buffer);
+                    if ret.is_err() {
+                        break;
+                    }
+                    if buffer.is_empty() {
+                        break;
+                    }
+                    let v: Vec<&str> = buffer.split_whitespace().collect();
+                    if v.len() != 2 {
+                        panic!("invalid cfg file");
+                    }
+                    assert_eq!(v.len(), 2);
+                    src = v[0].parse::<usize>().unwrap();
+                    dst = v[1].parse::<usize>().unwrap();
+
+                    let cnt: usize = self.successor_count[src] as usize;
+                    self.successor_map[src][cnt] = dst as u32;
+                    self.successor_count[src] += 1;
+                }
+            } else {
+                panic!("AFL_CFG_PATH not exists");
+            }
+        } else {
+            panic!("AFL_CFG_PATH not set");
+        }
+    }
+
+    /// Change scheduling method to setcover.
+    fn use_setcover_schedule(&mut self) {
+        if self.use_setcover_scheduling {
+            return;
+        }
+        self.use_setcover_scheduling = true;
+        self.load_cfg();
+        assert!(self.successor_count.len() > 0);
+        assert!(self.successor_map.len() > 0);
+        self.virgin_bits = vec![0xff; MAP_SIZE];
+    }
+
+    fn is_frontier_node_outer(&self, edge_id: usize) -> bool {
+        let num_successors: u32 = self.successor_count[edge_id];
+        if num_successors <= 1 {
+            return false;
+        } else {
+            let mut not_visited: bool = false;
+
+            for i in 0..num_successors {
+                let successors: &Vec<u32> = &self.successor_map[edge_id];
+                let succ_id: &u32 = successors.get(i as usize).unwrap();
+
+                let succ_status = self.virgin_bits[*succ_id as usize];
+
+                if succ_status == 0xff {
+                    not_visited = true;
+                    break;
+                }
+            }
+            return not_visited;
+        }
+    }
+
+    fn is_frontier_node_inner(&self, trace_bits: &Vec<u8>, edge_id: usize) -> bool {
+        let num_successors: u32 = self.successor_count[edge_id];
+        if num_successors <= 1 {
+            return false;
+        } else {
+            let mut not_visited: bool = false;
+
+            for i in 0..num_successors {
+                let successors: &Vec<u32> = &self.successor_map[edge_id];
+                let succ_id: &u32 = successors.get(i as usize).unwrap();
+
+                let virgin_status: u8 = self.virgin_bits[*succ_id as usize];
+                let current_status: u8 = trace_bits[*succ_id as usize];
+
+                if virgin_status == 0xff && current_status == 0x00 {
+                    not_visited = true;
+                    break;
+                }
+            }
+            return not_visited;
+        }
+    }
+
+    /// Update global frontier nodes
+    fn update_global_frontier_nodes(&mut self, id: CorpusId) {
+        let mut updated_coverage_count: u32 = 0;
+        let mut init_count: u32 = 0;
+        let mut real_map_size: usize = 0;
+
+        // get number of covered frontier nodes from input
+        if true {
+            let input_ref: RefMut<'_, Testcase<I>> = self.corpus().get(id).unwrap().borrow_mut();
+            let input: &Testcase<I> = input_ref.deref();
+
+            init_count = input.covered_frontier_nodes_count().unwrap();
+
+            real_map_size = input.frontier_node_bitmap().unwrap().len();
+            assert!(real_map_size != 0);
+        }
+
+        let mut count: u32 = 0;
+        for i in 0..(real_map_size / 8) {
+            let mut current: u8 = 0;
+            if true {
+                let input_ref: RefMut<'_, Testcase<I>> =
+                    self.corpus().get(id).unwrap().borrow_mut();
+                current = input_ref
+                    .deref()
+                    .frontier_node_bitmap()
+                    .unwrap()
+                    .get_ubyte(i);
+            }
+            if current == 0 {
+                continue;
+            }
+
+            for bit in 0..(8) {
+                let edge_id: usize = (i * 8) + bit;
+                assert!(edge_id >= (i * 8));
+                if (current & (1 << bit)) != 0 {
+                    assert!(edge_id < real_map_size);
+
+                    if !self.is_frontier_node_outer(edge_id) {
+                        count += 1;
+                        if self.global_frontier_bitmap.get(edge_id) {
+                            self.global_frontier_bitmap.clear(edge_id);
+
+                            self.global_covered_frontier_nodes_count -= 1;
+                        }
+
+                        current = current & !(1 << bit);
+                    }
+                }
+            }
+
+            // frontier_node_bitmap[i] = current;
+            if true {
+                let mut input_ref: RefMut<'_, Testcase<I>> =
+                    self.corpus().get(id).unwrap().borrow_mut();
+                input_ref
+                    .deref_mut()
+                    .frontier_node_bitmap_mut()
+                    .unwrap()
+                    .set_ubyte(i, current);
+            }
+            updated_coverage_count += popcount8(current) as u32;
+        }
+
+        // q->covered_frontier_nodes_count = updated_coverage_count;
+        if true {
+            let mut input_ref: RefMut<'_, Testcase<I>> =
+                self.corpus().get(id).unwrap().borrow_mut();
+            let _res: Result<(), Error> = input_ref
+                .deref_mut()
+                .set_covered_frontier_nodes_count(updated_coverage_count);
+        }
+        if self.global_covered_frontier_nodes_count == 0 {
+            println!(
+                "Seed id {}, initial count {}, count {}",
+                id, init_count, count
+            );
+            panic!("global_covered_frontier_nodes_count is 0");
+        }
+    }
+
+    /// Perform seed reduction.
+    fn setcover_reduction(&mut self) {
+        assert!(self.use_setcover_scheduling);
+        self.local_covered.clear_all();
+        if self.corpus().is_empty() {
+            panic!("No seeds in corpus");
+        }
+
+        let mut fast_seed_exist: bool = false;
+        let mut set_covered_seed_list: Vec<CorpusId> = vec![];
+        let mut set_covered_fast_seed_list: Vec<CorpusId> = vec![];
+
+        let mut unselected_seeds: Vec<CorpusId> = vec![];
+        let mut all_seeds: Vec<CorpusId> = vec![];
+
+        let mut unselected_seeds_count: u32 = 0;
+        self.covered_seed_list_counter = 0;
+        self.covered_fast_seed_list_counter = 0;
+
+        let mut total_exec_us: f64 = 0.0;
+        let mut total_exec_us_sq: f64 = 0.0;
+        let mut max_exec_us: f64 = 0.0;
+
+        use core::ops::Deref;
+
+        for it in self.corpus().ids() {
+            all_seeds.push(it);
+        }
+
+        // compute execution time statistics,
+        // and count the number of seeds
+        for it in &all_seeds {
+            // self.update_global_frontier_nodes(*it);
+
+            let input_ref: Ref<'_, Testcase<I>> = self.corpus().get(*it).unwrap().borrow();
+
+            let input: &Testcase<I> = input_ref.deref();
+
+            let mut exec_time_us: f64 = DEFAULT_EXEC_TIME_US;
+            let exec_time: &Option<Duration> = input.exec_time();
+            if exec_time != &None {
+                exec_time_us = exec_time.unwrap().as_micros() as f64;
+            } else {
+                // use default value
+            }
+
+            total_exec_us += exec_time_us;
+            total_exec_us_sq += exec_time_us * exec_time_us;
+            max_exec_us = max_exec_us.max(exec_time_us);
+
+            let covered_frontier_nodes_count = input.covered_frontier_nodes_count().unwrap();
+
+            if covered_frontier_nodes_count > 0 {
+                unselected_seeds_count += 1;
+                unselected_seeds.push(*it);
+            }
+        }
+
+        // compute mean and standard deviation
+        let corpus_count_f: f64 = self.corpus().count() as f64;
+        let mean_exec_us: f64 = (total_exec_us - max_exec_us) / (corpus_count_f - 1.0);
+        let stddev_exec_us_sq: f64 =
+            total_exec_us_sq / corpus_count_f - mean_exec_us * mean_exec_us;
+        let stddev_exec_us: f64 = stddev_exec_us_sq.sqrt();
+
+        if unselected_seeds_count == 0 {
+            // randomly select one from all seeds.
+            let random_idx: usize = getrand64() % all_seeds.len();
+            let _ret: Result<(), Error> = self.corpus_mut().set_favored_id(all_seeds[random_idx]);
+        } else {
+            assert_eq!(unselected_seeds_count, unselected_seeds.len() as u32);
+
+            while unselected_seeds_count > 0 {
+                // randomly sample a seed.
+                let random_idx: usize = getrand64() % unselected_seeds.len();
+                let seed_index: CorpusId = all_seeds[random_idx];
+                let mut exec_time: f64 = DEFAULT_EXEC_TIME_US;
+
+                // compute execution time, use default value if not available.
+                if true {
+                    let seed_ref: Ref<'_, Testcase<I>> =
+                        self.corpus().get(seed_index).unwrap().borrow();
+                    let reduction_seed: &Testcase<I> = seed_ref.deref();
+
+                    let exec_time_opt: &Option<Duration> = reduction_seed.exec_time();
+                    if exec_time_opt != &None {
+                        exec_time = exec_time_opt.unwrap().as_micros() as f64;
+                    }
+                }
+
+                // decrement size of unselected seeds,
+                // move the last element to the current position.
+                unselected_seeds_count -= 1;
+                unselected_seeds[random_idx] = unselected_seeds[unselected_seeds_count as usize];
+
+                let mut local_covered_intersection_num: u32 = 0;
+                // compute local_covered_intersection_num.
+                if true {
+                    let mut len: usize = 0;
+                    if true {
+                        let local_covered: &mut Bitmap = &mut self.local_covered;
+                        len = local_covered.len();
+                    }
+                    assert_ne!(len, 0);
+
+                    for j in 0..(len / 8) {
+                        let mut previous: u8 = 0;
+                        if true {
+                            previous = self.local_covered.get_ubyte(j);
+                        }
+
+                        let mut current: u8 = 0;
+
+                        if true {
+                            let seed_ref: Ref<'_, Testcase<I>> =
+                                self.corpus().get(seed_index).unwrap().borrow();
+                            let reduction_seed: &Testcase<I> = seed_ref.deref();
+                            current = reduction_seed.frontier_node_bitmap().unwrap().get_ubyte(j);
+                        }
+
+                        if true {
+                            let local_covered: &mut Bitmap = &mut self.local_covered;
+                            local_covered.set_ubyte(j, previous | current);
+                            local_covered_intersection_num +=
+                                popcount8(local_covered.get_ubyte(j) & (!previous)) as u32;
+                        }
+                    }
+                }
+
+                if local_covered_intersection_num == 0 {
+                    continue;
+                }
+
+                // record in the seed list and fast seed list.
+                set_covered_seed_list.push(seed_index);
+                if exec_time < mean_exec_us + 1.0 * stddev_exec_us {
+                    fast_seed_exist = true;
+                    set_covered_fast_seed_list.push(seed_index);
+                }
+
+                // check whether all frontier nodes are covered.
+                let mut all_covered: bool = true;
+
+                if true {
+                    let local_covered: &mut Bitmap = &mut self.local_covered;
+                    for j in 0..local_covered.len() / 8 {
+                        let previous: u8 = local_covered.get_ubyte(j);
+                        let global: u8 = self.global_frontier_bitmap.get_ubyte(j);
+
+                        if (!previous) & global == 0 {
+                            all_covered = false;
+                            break;
+                        }
+                    }
+                }
+
+                // update the number of fast seeds.
+                if true {
+                    let count_fast = set_covered_fast_seed_list.len();
+                    self.corpus_mut().set_fast(count_fast);
+                }
+                if all_covered {
+                    if fast_seed_exist {
+                        // randomly select one of the fast seed.
+                        let random_idx: usize = getrand64() % set_covered_fast_seed_list.len();
+                        let _ret: Result<(), Error> = self
+                            .corpus_mut()
+                            .set_favored_id(set_covered_fast_seed_list[random_idx]);
+                    } else {
+                        // randomly select one of the seed.
+                        let random_idx: usize = getrand64() % set_covered_seed_list.len();
+                        let _ret: Result<(), Error> = self
+                            .corpus_mut()
+                            .set_favored_id(set_covered_seed_list[random_idx]);
+                    }
+
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Update bitmap score.
+    fn update_bitmap_score(&mut self, trace_bits: Vec<u8>, id: CorpusId) {
+        let trace_len: usize = trace_bits.len();
+
+        for i in 0..trace_len {
+            let bit: u8 = trace_bits[i];
+            if bit != 0 {
+                let edge_id: usize = i;
+
+                if self.is_frontier_node_inner(&trace_bits, edge_id) {
+                    // update this edge.
+                    if true {
+                        let mut input_ref: RefMut<'_, Testcase<I>> =
+                            self.corpus().get(id).unwrap().borrow_mut();
+
+                        let input: &mut Testcase<I> = input_ref.deref_mut();
+
+                        let frontier_bitmap: &mut Bitmap =
+                            input.frontier_node_bitmap_mut().unwrap();
+                        frontier_bitmap.set(edge_id);
+
+                        let nodes_count: u32 = input.covered_frontier_nodes_count().unwrap();
+                        let _res: Result<(), Error> =
+                            input.set_covered_frontier_nodes_count(nodes_count + 1);
+                    }
+
+                    // update global frontier bitmap.
+                    if true {
+                        let global_frontier_bitmap: &mut Bitmap = &mut self.global_frontier_bitmap;
+                        if !global_frontier_bitmap.get(edge_id) {
+                            global_frontier_bitmap.set(edge_id);
+                            self.global_covered_frontier_nodes_count += 1;
+                        }
+                    }
+                }
+
+                self.top_rated[i] = Some(id);
+                self.score_changed = true;
+            }
+        }
+    }
+
+    /// Go over top rated entries and sequentially grab
+    /// winners for previously unseen bytes and marks
+    /// them as favored.
+    fn cull_queue(&mut self) {
+        self.setcover_reduction();
+    }
+}
+
+impl StdState<NopInput, InMemoryCorpus<NopInput>, StdRand, InMemoryCorpus<NopInput>> {
     /// Create an empty [`StdState`] that has very minimal uses.
     /// Potentially good for testing.
-    pub fn nop() -> Result<
-        StdState<InMemoryCorpus<NopInput>, NopInput, StdRand, InMemoryCorpus<NopInput>>,
-        Error,
-    > {
+    pub fn nop<I>() -> Result<StdState<I, InMemoryCorpus<I>, StdRand, InMemoryCorpus<I>>, Error>
+    where
+        I: Input,
+    {
         StdState::new(
             StdRand::with_seed(0),
-            InMemoryCorpus::<NopInput>::new(),
+            InMemoryCorpus::<I>::new(),
             InMemoryCorpus::new(),
             &mut (),
             &mut (),
@@ -1141,7 +1741,7 @@ impl StdState<InMemoryCorpus<NopInput>, NopInput, StdRand, InMemoryCorpus<NopInp
 }
 
 #[cfg(feature = "introspection")]
-impl<C, I, R, SC> HasClientPerfMonitor for StdState<C, I, R, SC> {
+impl<I, C, R, SC> HasClientPerfMonitor for StdState<I, C, R, SC> {
     fn introspection_monitor(&self) -> &ClientPerfMonitor {
         &self.introspection_monitor
     }
@@ -1151,11 +1751,21 @@ impl<C, I, R, SC> HasClientPerfMonitor for StdState<C, I, R, SC> {
     }
 }
 
+#[cfg(feature = "scalability_introspection")]
+impl<I, C, R, SC> HasScalabilityMonitor for StdState<I, C, R, SC> {
+    fn scalability_monitor(&self) -> &ScalabilityMonitor {
+        &self.scalability_monitor
+    }
+
+    fn scalability_monitor_mut(&mut self) -> &mut ScalabilityMonitor {
+        &mut self.scalability_monitor
+    }
+}
+
 /// A very simple state without any bells or whistles, for testing.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct NopState<I> {
     metadata: SerdeAnyMap,
-    named_metadata: NamedSerdeAnyMap,
     execution: u64,
     stop_requested: bool,
     rand: StdRand,
@@ -1168,7 +1778,6 @@ impl<I> NopState<I> {
     pub fn new() -> Self {
         NopState {
             metadata: SerdeAnyMap::new(),
-            named_metadata: NamedSerdeAnyMap::new(),
             execution: 0,
             rand: StdRand::default(),
             stop_requested: false,
@@ -1187,16 +1796,11 @@ impl<I> HasMaxSize for NopState<I> {
     }
 }
 
-impl<I> HasCorpus<I> for NopState<I> {
-    type Corpus = InMemoryCorpus<I>;
-
-    fn corpus(&self) -> &Self::Corpus {
-        unimplemented!("Unimplemented for NopState!");
-    }
-
-    fn corpus_mut(&mut self) -> &mut Self::Corpus {
-        unimplemented!("Unimplemented for No[State!");
-    }
+impl<I> UsesInput for NopState<I>
+where
+    I: Input,
+{
+    type Input = I;
 }
 
 impl<I> HasExecutions for NopState<I> {
@@ -1243,16 +1847,6 @@ impl<I> HasMetadata for NopState<I> {
     }
 }
 
-impl<I> HasNamedMetadata for NopState<I> {
-    fn named_metadata_map(&self) -> &NamedSerdeAnyMap {
-        &self.named_metadata
-    }
-
-    fn named_metadata_map_mut(&mut self) -> &mut NamedSerdeAnyMap {
-        &mut self.named_metadata
-    }
-}
-
 impl<I> HasRand for NopState<I> {
     type Rand = StdRand;
 
@@ -1264,6 +1858,8 @@ impl<I> HasRand for NopState<I> {
         &mut self.rand
     }
 }
+
+impl<I> State for NopState<I> where I: Input {}
 
 impl<I> HasCurrentCorpusId for NopState<I> {
     fn set_corpus_id(&mut self, _id: CorpusId) -> Result<(), Error> {
@@ -1304,12 +1900,66 @@ impl<I> HasClientPerfMonitor for NopState<I> {
     }
 }
 
+#[cfg(feature = "scalability_introspection")]
+impl<I> HasScalabilityMonitor for NopState<I> {
+    fn scalability_monitor(&self) -> &ScalabilityMonitor {
+        unimplemented!();
+    }
+
+    fn scalability_monitor_mut(&mut self) -> &mut ScalabilityMonitor {
+        unimplemented!();
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use crate::state::StdState;
+    use crate::{inputs::BytesInput, state::StdState};
 
     #[test]
     fn test_std_state() {
-        StdState::nop().expect("couldn't instantiate the test state");
+        StdState::nop::<BytesInput>().expect("couldn't instantiate the test state");
+    }
+
+    #[test]
+    fn test_load_cfg() {
+        // create a fake cfg file.
+        use crate::state::HasSetCover;
+        use std::io::Write;
+
+        use crate::state::MAP_SIZE;
+        let fname: &str = "/tmp/tmp_cfg";
+        let mut fobj: std::fs::File = std::fs::File::create(fname).unwrap();
+        let _ = fobj.write_all(b"0 1\n");
+        let _ = fobj.write_all(b"6  5\n");
+        let _ = fobj.sync_all();
+
+        // check that the loadcfg works
+        let mut state: StdState<BytesInput, _, _, _> =
+            StdState::nop::<BytesInput>().expect("couldn't instantiate the test state");
+        assert_eq!(state.global_frontier_bitmap.len(), MAP_SIZE);
+        assert_eq!(state.initial_frontier_bitmap.len(), MAP_SIZE);
+        assert_eq!(state.local_covered.len(), MAP_SIZE);
+
+        let key: &str = "AFL_CFG_PATH";
+        let old_cfg_path = std::env::var(key);
+        std::env::set_var(key, fname);
+
+        state.use_setcover_schedule();
+        assert!(state.use_setcover_scheduling);
+        assert!(state.virgin_bits.len() == MAP_SIZE);
+        assert_eq!(state.successor_count[0], 1);
+        assert_eq!(state.successor_count[6], 1);
+        assert_eq!(state.successor_map[0][0], 1);
+        assert_eq!(state.successor_map[6][0], 5);
+
+        // recover old env var
+        if old_cfg_path.is_ok() {
+            std::env::set_var(key, old_cfg_path.unwrap());
+        } else {
+            std::env::remove_var(key);
+        }
+
+        // remove the temporay file.
+        std::fs::remove_file(fname).unwrap();
     }
 }

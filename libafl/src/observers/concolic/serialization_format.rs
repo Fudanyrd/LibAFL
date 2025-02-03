@@ -219,7 +219,7 @@ impl<R: Read> MessageFileReader<R> {
 
 /// A `MessageFileWriter` writes a stream of [`SymExpr`] to any [`Write`]. For each written expression, it returns
 /// a [`SymExprRef`] which should be used to refer back to it.
-pub struct MessageFileWriter<W> {
+pub struct MessageFileWriter<W: Write> {
     id_counter: usize,
     writer: W,
     writer_start_position: u64,
@@ -396,7 +396,7 @@ impl<W: Write + Seek> MessageFileWriter<W> {
     }
 }
 
-use libafl_bolts::shmem::{ShMem, ShMemCursor, ShMemProvider, StdShMem, StdShMemProvider};
+use libafl_bolts::shmem::{ShMem, ShMemCursor, ShMemProvider, StdShMemProvider};
 
 /// The default environment variable name to use for the shared memory used by the concolic tracing
 pub const DEFAULT_ENV_NAME: &str = "SHARED_MEMORY_MESSAGES";
@@ -439,17 +439,14 @@ impl<'buffer> MessageFileReader<Cursor<&'buffer [u8]>> {
     }
 }
 
-impl<SHM> MessageFileWriter<ShMemCursor<SHM>>
-where
-    SHM: ShMem,
-{
+impl<T: ShMem> MessageFileWriter<ShMemCursor<T>> {
     /// Creates a new `MessageFileWriter` from the given [`ShMemCursor`].
-    pub fn from_shmem(shmem: SHM) -> io::Result<Self> {
+    pub fn from_shmem(shmem: T) -> io::Result<Self> {
         Self::from_writer(ShMemCursor::new(shmem))
     }
 }
 
-impl MessageFileWriter<ShMemCursor<StdShMem>> {
+impl MessageFileWriter<ShMemCursor<<StdShMemProvider as ShMemProvider>::ShMem>> {
     /// Creates a new `MessageFileWriter` by reading a [`ShMem`] from the given environment variable.
     pub fn from_stdshmem_env_with_name(env_name: impl AsRef<str>) -> io::Result<Self> {
         Self::from_shmem(
@@ -467,7 +464,8 @@ impl MessageFileWriter<ShMemCursor<StdShMem>> {
 }
 
 /// A writer that will write messages to a shared memory buffer.
-pub type StdShMemMessageFileWriter<SHM> = MessageFileWriter<ShMemCursor<SHM>>;
+pub type StdShMemMessageFileWriter =
+    MessageFileWriter<ShMemCursor<<StdShMemProvider as ShMemProvider>::ShMem>>;
 
 #[cfg(test)]
 mod serialization_tests {

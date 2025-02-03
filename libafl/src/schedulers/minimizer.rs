@@ -72,26 +72,28 @@ impl Default for TopRatedsMetadata {
 ///
 /// E.g., it can use all the coverage seen so far to prioritize [`Testcase`]`s` using a [`TestcaseScore`].
 #[derive(Debug, Clone)]
-pub struct MinimizerScheduler<CS, F, I, M, S> {
+pub struct MinimizerScheduler<CS, F, M, S> {
     base: CS,
     skip_non_favored_prob: f64,
     remove_metadata: bool,
-    phantom: PhantomData<(F, I, M, S)>,
+    phantom: PhantomData<(F, M, S)>,
 }
 
-impl<CS, F, M, I, O, S> RemovableScheduler<I, S> for MinimizerScheduler<CS, F, I, M, O>
+impl<CS, F, M, O, S> RemovableScheduler<<S::Corpus as Corpus>::Input, S>
+    for MinimizerScheduler<CS, F, M, O>
 where
-    CS: RemovableScheduler<I, S> + Scheduler<I, S>,
-    F: TestcaseScore<I, S>,
+    CS: RemovableScheduler<<S::Corpus as Corpus>::Input, S>
+        + Scheduler<<S::Corpus as Corpus>::Input, S>,
+    F: TestcaseScore<S>,
     M: for<'a> AsIter<'a, Item = usize> + SerdeAny + HasRefCnt,
-    S: HasCorpus<I> + HasMetadata + HasRand,
+    S: HasCorpus + HasMetadata + HasRand,
 {
     /// Replaces the [`Testcase`] at the given [`CorpusId`]
     fn on_replace(
         &mut self,
         state: &mut S,
         id: CorpusId,
-        testcase: &Testcase<I>,
+        testcase: &Testcase<<S::Corpus as Corpus>::Input>,
     ) -> Result<(), Error> {
         self.base.on_replace(state, id, testcase)?;
         self.update_score(state, id)
@@ -102,7 +104,7 @@ where
         &mut self,
         state: &mut S,
         id: CorpusId,
-        testcase: &Option<Testcase<I>>,
+        testcase: &Option<Testcase<<S::Corpus as Corpus>::Input>>,
     ) -> Result<(), Error> {
         self.base.on_remove(state, id, testcase)?;
         let mut entries =
@@ -163,7 +165,7 @@ where
             let reserve = if meta.map.is_empty() {
                 map_iter.size_hint().0
             } else {
-                map_iter.size_hint().0.div_ceil(2)
+                (map_iter.size_hint().0 + 1) / 2
             };
             meta.map.reserve(reserve);
 
@@ -186,12 +188,12 @@ where
     }
 }
 
-impl<CS, F, I, M, O, S> Scheduler<I, S> for MinimizerScheduler<CS, F, I, M, O>
+impl<CS, F, M, O, S> Scheduler<<S::Corpus as Corpus>::Input, S> for MinimizerScheduler<CS, F, M, O>
 where
-    CS: Scheduler<I, S>,
-    F: TestcaseScore<I, S>,
+    CS: Scheduler<<S::Corpus as Corpus>::Input, S>,
+    F: TestcaseScore<S>,
     M: for<'a> AsIter<'a, Item = usize> + SerdeAny + HasRefCnt,
-    S: HasCorpus<I> + HasMetadata + HasRand,
+    S: HasCorpus + HasMetadata + HasRand,
 {
     /// Called when a [`Testcase`] is added to the corpus
     fn on_add(&mut self, state: &mut S, id: CorpusId) -> Result<(), Error> {
@@ -200,7 +202,12 @@ where
     }
 
     /// An input has been evaluated
-    fn on_evaluation<OT>(&mut self, state: &mut S, input: &I, observers: &OT) -> Result<(), Error>
+    fn on_evaluation<OT>(
+        &mut self,
+        state: &mut S,
+        input: &<S::Corpus as Corpus>::Input,
+        observers: &OT,
+    ) -> Result<(), Error>
     where
         OT: MatchName,
     {
@@ -236,7 +243,7 @@ where
     }
 }
 
-impl<CS, F, I, M, O> MinimizerScheduler<CS, F, I, M, O>
+impl<CS, F, M, O> MinimizerScheduler<CS, F, M, O>
 where
     M: for<'a> AsIter<'a, Item = usize> + SerdeAny + HasRefCnt,
 {
@@ -244,8 +251,8 @@ where
     #[expect(clippy::cast_possible_wrap)]
     pub fn update_score<S>(&self, state: &mut S, id: CorpusId) -> Result<(), Error>
     where
-        F: TestcaseScore<I, S>,
-        S: HasCorpus<I> + HasMetadata,
+        F: TestcaseScore<S>,
+        S: HasCorpus + HasMetadata,
     {
         // Create a new top rated meta if not existing
         if state.metadata_map().get::<TopRatedsMetadata>().is_none() {
@@ -321,7 +328,7 @@ where
     /// Cull the [`Corpus`] using the [`MinimizerScheduler`]
     pub fn cull<S>(&self, state: &S) -> Result<(), Error>
     where
-        S: HasCorpus<I> + HasMetadata,
+        S: HasCorpus + HasMetadata,
     {
         let Some(top_rated) = state.metadata_map().get::<TopRatedsMetadata>() else {
             return Ok(());
@@ -349,7 +356,7 @@ where
         Ok(())
     }
 }
-impl<CS, F, I, M, O> HasQueueCycles for MinimizerScheduler<CS, F, I, M, O>
+impl<CS, F, M, O> HasQueueCycles for MinimizerScheduler<CS, F, M, O>
 where
     CS: HasQueueCycles,
 {
@@ -357,7 +364,7 @@ where
         self.base.queue_cycles()
     }
 }
-impl<CS, F, I, M, O> MinimizerScheduler<CS, F, I, M, O>
+impl<CS, F, M, O> MinimizerScheduler<CS, F, M, O>
 where
     O: CanTrack,
 {
@@ -418,10 +425,10 @@ where
 }
 
 /// A [`MinimizerScheduler`] with [`LenTimeMulTestcaseScore`] to prioritize quick and small [`Testcase`]`s`.
-pub type LenTimeMinimizerScheduler<CS, I, M, O> =
-    MinimizerScheduler<CS, LenTimeMulTestcaseScore, I, M, O>;
+pub type LenTimeMinimizerScheduler<CS, M, O> =
+    MinimizerScheduler<CS, LenTimeMulTestcaseScore, M, O>;
 
 /// A [`MinimizerScheduler`] with [`LenTimeMulTestcaseScore`] to prioritize quick and small [`Testcase`]`s`
 /// that exercise all the entries registered in the [`MapIndexesMetadata`].
-pub type IndexesLenTimeMinimizerScheduler<CS, I, O> =
-    MinimizerScheduler<CS, LenTimeMulTestcaseScore, I, MapIndexesMetadata, O>;
+pub type IndexesLenTimeMinimizerScheduler<CS, O> =
+    MinimizerScheduler<CS, LenTimeMulTestcaseScore, MapIndexesMetadata, O>;

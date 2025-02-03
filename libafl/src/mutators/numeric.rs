@@ -1,7 +1,6 @@
 //! Mutators for integer-style inputs
 
 use alloc::borrow::Cow;
-use core::marker::PhantomData;
 
 use libafl_bolts::{
     rands::Rand,
@@ -27,15 +26,9 @@ pub type IntMutatorsType = tuple_list_type!(
     RandMutator,
     CrossoverMutator
 );
-
-/// Mutators for integer-like inputs that implement some form of crossover
-pub type IntMutatorsCrossoverType = tuple_list_type!(CrossoverMutator);
-
-/// Mapped mutators for integer-like inputs that implement some form of crossover.
-pub type MappedIntMutatorsCrossoverType<F, I> = tuple_list_type!(MappedCrossoverMutator<F, I>);
-
-/// Mutators for integer-like inputs without crossover mutations
-pub type IntMutatorsNoCrossoverType = tuple_list_type!(
+type IntMutatorsCrossoverType = tuple_list_type!(CrossoverMutator);
+type MappedIntMutatorsCrossoverType<F> = tuple_list_type!(MappedCrossoverMutator<F>);
+type IntMutatorsNoCrossoverType = tuple_list_type!(
     BitFlipMutator,
     NegateMutator,
     IncMutator,
@@ -65,9 +58,7 @@ pub fn int_mutators_crossover() -> IntMutatorsCrossoverType {
 
 /// Mutators for integer-like inputs that implement some form of crossover with a mapper to extract the crossed over information.
 #[must_use]
-pub fn mapped_int_mutators_crossover<F, I>(
-    input_mapper: F,
-) -> MappedIntMutatorsCrossoverType<F, I> {
+pub fn mapped_int_mutators_crossover<F>(input_mapper: F) -> MappedIntMutatorsCrossoverType<F> {
     tuple_list!(MappedCrossoverMutator::new(input_mapper))
 }
 
@@ -80,14 +71,14 @@ pub fn int_mutators() -> IntMutatorsType {
 }
 
 /// Mapped mutators for integer-like inputs
-pub type MappedIntMutatorsType<F1, F2, I> = tuple_list_type!(
+pub type MappedIntMutatorsType<F1, F2> = tuple_list_type!(
     MappingMutator<BitFlipMutator,F1>,
     MappingMutator<NegateMutator,F1>,
     MappingMutator<IncMutator,F1>,
     MappingMutator<DecMutator,F1>,
     MappingMutator<TwosComplementMutator,F1>,
     MappingMutator<RandMutator,F1>,
-    MappingMutator<MappedCrossoverMutator<F2, I>,F1>
+    MappingMutator<MappedCrossoverMutator<F2>,F1>
 );
 
 /// Mapped mutators for integer-like inputs
@@ -96,7 +87,7 @@ pub type MappedIntMutatorsType<F1, F2, I> = tuple_list_type!(
 pub fn mapped_int_mutators<F1, F2, IO, II>(
     current_input_mapper: F1,
     input_from_corpus_mapper: F2,
-) -> MappedIntMutatorsType<F1, F2, IO>
+) -> MappedIntMutatorsType<F1, F2>
 where
     F1: Clone + FnMut(&mut IO) -> &mut II,
 {
@@ -368,7 +359,8 @@ pub struct CrossoverMutator;
 
 impl<I, S> Mutator<I, S> for CrossoverMutator
 where
-    S: HasRand + HasCorpus<I>,
+    S: HasRand + HasCorpus,
+    S::Corpus: Corpus<Input = I>,
     I: Copy,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -391,28 +383,24 @@ impl Named for CrossoverMutator {
 }
 /// Crossover mutation for integer-like inputs with custom state extraction function
 #[derive(Debug)]
-pub struct MappedCrossoverMutator<F, I> {
+pub struct MappedCrossoverMutator<F> {
     input_mapper: F,
-    phantom: PhantomData<I>,
 }
 
-impl<F, I> MappedCrossoverMutator<F, I> {
+impl<F> MappedCrossoverMutator<F> {
     /// Create a new [`MappedCrossoverMutator`]
     pub fn new(input_mapper: F) -> Self {
-        Self {
-            input_mapper,
-            phantom: PhantomData,
-        }
+        Self { input_mapper }
     }
 }
 
-impl<I, O, S, F> Mutator<O, S> for MappedCrossoverMutator<F, I>
+impl<I, S, F> Mutator<I, S> for MappedCrossoverMutator<F>
 where
-    S: HasRand + HasCorpus<I>,
-    for<'b> F: Fn(&'b I) -> &'b O,
-    O: Clone,
+    S: HasRand + HasCorpus,
+    for<'b> F: Fn(&'b <S::Corpus as Corpus>::Input) -> &'b I,
+    I: Clone,
 {
-    fn mutate(&mut self, state: &mut S, input: &mut O) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         let id = random_corpus_id_with_disabled!(state.corpus(), state.rand_mut());
 
         if state.corpus().current().is_some_and(|cur| cur == id) {
@@ -427,7 +415,7 @@ where
     }
 }
 
-impl<F, I> Named for MappedCrossoverMutator<F, I> {
+impl<F> Named for MappedCrossoverMutator<F> {
     fn name(&self) -> &Cow<'static, str> {
         &Cow::Borrowed("MappedCrossoverMutator")
     }

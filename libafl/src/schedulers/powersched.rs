@@ -1,7 +1,7 @@
 //! The queue corpus scheduler for power schedules.
 
 use alloc::vec::Vec;
-use core::{hash::Hash, marker::PhantomData, time::Duration};
+use core::{marker::PhantomData, time::Duration};
 
 use libafl_bolts::{
     tuples::{Handle, Handled, MatchName},
@@ -11,11 +11,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     corpus::{Corpus, CorpusId, HasTestcase, Testcase},
+    observers::MapObserver,
     schedulers::{
         on_add_metadata_default, on_evaluation_metadata_default, on_next_metadata_default,
         AflScheduler, HasQueueCycles, RemovableScheduler, Scheduler,
     },
-    state::HasCorpus,
+    state::{HasCorpus, State},
     Error, HasMetadata,
 };
 
@@ -275,7 +276,7 @@ pub enum BaseSchedule {
 pub struct PowerQueueScheduler<C, O> {
     queue_cycles: u64,
     strat: PowerSchedule,
-    observer_handle: Handle<C>,
+    map_observer_handle: Handle<C>,
     last_hash: usize,
     phantom: PhantomData<O>,
 }
@@ -303,7 +304,7 @@ impl<C, I, O, S> RemovableScheduler<I, S> for PowerQueueScheduler<C, O> {
 }
 
 impl<C, O> AflScheduler for PowerQueueScheduler<C, O> {
-    type ObserverRef = C;
+    type MapObserverRef = C;
 
     fn last_hash(&self) -> usize {
         self.last_hash
@@ -313,8 +314,8 @@ impl<C, O> AflScheduler for PowerQueueScheduler<C, O> {
         self.last_hash = hash;
     }
 
-    fn observer_handle(&self) -> &Handle<C> {
-        &self.observer_handle
+    fn map_observer_handle(&self) -> &Handle<C> {
+        &self.map_observer_handle
     }
 }
 
@@ -326,8 +327,8 @@ impl<C, O> HasQueueCycles for PowerQueueScheduler<C, O> {
 
 impl<C, I, O, S> Scheduler<I, S> for PowerQueueScheduler<C, O>
 where
-    S: HasCorpus<I> + HasMetadata + HasTestcase<I>,
-    O: Hash,
+    S: HasCorpus + HasMetadata + HasTestcase + State,
+    O: MapObserver,
     C: AsRef<O>,
 {
     /// Called when a [`Testcase`] is added to the corpus
@@ -382,12 +383,12 @@ where
 
 impl<C, O> PowerQueueScheduler<C, O>
 where
-    O: Hash,
+    O: MapObserver,
     C: AsRef<O> + Named,
 {
     /// Create a new [`PowerQueueScheduler`]
     #[must_use]
-    pub fn new<S>(state: &mut S, observer: &C, strat: PowerSchedule) -> Self
+    pub fn new<S>(state: &mut S, map_observer: &C, strat: PowerSchedule) -> Self
     where
         S: HasMetadata,
     {
@@ -397,7 +398,7 @@ where
         PowerQueueScheduler {
             queue_cycles: 0,
             strat,
-            observer_handle: observer.handle(),
+            map_observer_handle: map_observer.handle(),
             last_hash: 0,
             phantom: PhantomData,
         }

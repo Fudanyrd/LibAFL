@@ -22,7 +22,7 @@ use libafl_bolts::{
     fs::{get_unique_std_input_file, InputFile},
     os::{dup2, pipes::Pipe},
     ownedref::OwnedSlice,
-    shmem::{ShMem, ShMemProvider, UnixShMem, UnixShMemProvider},
+    shmem::{ShMem, ShMemProvider, UnixShMemProvider},
     tuples::{Handle, Handled, MatchNameRef, Prepend, RefIndexable},
     AsSlice, AsSliceMut, Truncate,
 };
@@ -44,10 +44,12 @@ use crate::observers::{
 };
 use crate::{
     executors::{Executor, ExitKind, HasObservers},
-    inputs::{BytesInput, HasTargetBytes, Input, NopTargetBytesConverter, TargetBytesConverter},
+    inputs::{
+        BytesInput, HasTargetBytes, Input, NopTargetBytesConverter, TargetBytesConverter, UsesInput,
+    },
     mutators::Tokens,
     observers::{MapObserver, Observer, ObserversTuple},
-    state::HasExecutions,
+    state::{HasExecutions, State, UsesState},
     Error,
 };
 
@@ -606,7 +608,10 @@ impl Forkserver {
 ///
 /// Shared memory feature is also available, but you have to set things up in your code.
 /// Please refer to AFL++'s docs. <https://github.com/AFLplusplus/AFLplusplus/blob/stable/instrumentation/README.persistent_mode.md>
-pub struct ForkserverExecutor<I, OT, S, SHM, TC> {
+pub struct ForkserverExecutor<TC, OT, S, SP>
+where
+    SP: ShMemProvider,
+{
     target: OsString,
     args: Vec<OsString>,
     input_file: InputFile,
@@ -614,8 +619,8 @@ pub struct ForkserverExecutor<I, OT, S, SHM, TC> {
     uses_shmem_testcase: bool,
     forkserver: Forkserver,
     observers: OT,
-    map: Option<SHM>,
-    phantom: PhantomData<(I, S)>,
+    map: Option<SP::ShMem>,
+    phantom: PhantomData<S>,
     map_size: Option<usize>,
     min_input_size: usize,
     max_input_size: usize,
@@ -625,11 +630,11 @@ pub struct ForkserverExecutor<I, OT, S, SHM, TC> {
     crash_exitcode: Option<i8>,
 }
 
-impl<I, OT, S, SHM, TC> Debug for ForkserverExecutor<I, OT, S, SHM, TC>
+impl<TC, OT, S, SP> Debug for ForkserverExecutor<TC, OT, S, SP>
 where
     TC: Debug,
     OT: Debug,
-    SHM: Debug,
+    SP: ShMemProvider,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("ForkserverExecutor")
@@ -645,7 +650,7 @@ where
     }
 }
 
-impl ForkserverExecutor<(), (), (), UnixShMem, ()> {
+impl ForkserverExecutor<(), (), (), UnixShMemProvider> {
     /// Builder for `ForkserverExecutor`
     #[must_use]
     pub fn builder(
@@ -655,11 +660,12 @@ impl ForkserverExecutor<(), (), (), UnixShMem, ()> {
     }
 }
 
-impl<I, OT, S, SHM, TC> ForkserverExecutor<I, OT, S, SHM, TC>
+impl<TC, OT, S, SP> ForkserverExecutor<TC, OT, S, SP>
 where
-    OT: ObserversTuple<I, S>,
-    TC: TargetBytesConverter<I>,
-    SHM: ShMem,
+    OT: ObserversTuple<S::Input, S>,
+    S: UsesInput,
+    SP: ShMemProvider,
+    TC: TargetBytesConverter,
 {
     /// The `target` binary that's going to run.
     pub fn target(&self) -> &OsString {
@@ -693,7 +699,7 @@ where
 
     /// Execute input and increase the execution counter.
     #[inline]
-    fn execute_input(&mut self, state: &mut S, input: &I) -> Result<ExitKind, Error>
+    fn execute_input(&mut self, state: &mut S, input: &TC::Input) -> Result<ExitKind, Error>
     where
         S: HasExecutions,
     {
@@ -704,7 +710,7 @@ where
 
     /// Execute input, but side-step the execution counter.
     #[inline]
-    fn execute_input_uncounted(&mut self, input: &I) -> Result<ExitKind, Error> {
+    fn execute_input_uncounted(&mut self, input: &TC::Input) -> Result<ExitKind, Error> {
         let mut exit_kind = ExitKind::Ok;
 
         let last_run_timed_out = self.forkserver.last_run_timed_out_raw();
@@ -824,10 +830,9 @@ pub struct ForkserverExecutorBuilder<'a, TC, SP> {
     target_bytes_converter: TC,
 }
 
-impl<'a, TC, SHM, SP> ForkserverExecutorBuilder<'a, TC, SP>
+impl<'a, TC, SP> ForkserverExecutorBuilder<'a, TC, SP>
 where
-    SHM: ShMem,
-    SP: ShMemProvider<ShMem = SHM>,
+    SP: ShMemProvider,
 {
     /// Builds `ForkserverExecutor`.
     /// This Forkserver will attempt to provide inputs over shared mem when `shmem_provider` is given.
@@ -835,13 +840,13 @@ where
     /// in case no input file is specified.
     /// If `debug_child` is set, the child will print to `stdout`/`stderr`.
     #[expect(clippy::pedantic)]
-    pub fn build<I, OT, S>(
-        mut self,
-        observers: OT,
-    ) -> Result<ForkserverExecutor<I, OT, S, SHM, TC>, Error>
+    pub fn build<OT, S>(mut self, observers: OT) -> Result<ForkserverExecutor<TC, OT, S, SP>, Error>
     where
-        OT: ObserversTuple<I, S>,
-        TC: TargetBytesConverter<I>,
+        OT: ObserversTuple<S::Input, S>,
+        S: UsesInput,
+        S::Input: Input,
+        TC: TargetBytesConverter,
+        SP: ShMemProvider,
     {
         let (forkserver, input_file, map) = self.build_helper()?;
 
@@ -897,17 +902,19 @@ where
     }
 
     /// Builds `ForkserverExecutor` downsizing the coverage map to fit exaclty the AFL++ map size.
-    #[expect(clippy::pedantic, clippy::type_complexity)]
-    pub fn build_dynamic_map<A, MO, OT, I, S>(
+    #[expect(clippy::pedantic)]
+    pub fn build_dynamic_map<A, MO, OT, S>(
         mut self,
         mut map_observer: A,
         other_observers: OT,
-    ) -> Result<ForkserverExecutor<I, (A, OT), S, SHM, TC>, Error>
+    ) -> Result<ForkserverExecutor<TC, (A, OT), S, SP>, Error>
     where
-        A: Observer<I, S> + AsMut<MO>,
-        I: Input + HasTargetBytes,
         MO: MapObserver + Truncate, // TODO maybe enforce Entry = u8 for the cov map
-        OT: ObserversTuple<I, S> + Prepend<MO>,
+        A: Observer<S::Input, S> + AsMut<MO>,
+        OT: ObserversTuple<S::Input, S> + Prepend<MO>,
+        S: UsesInput,
+        S::Input: Input + HasTargetBytes,
+        SP: ShMemProvider,
     {
         let (forkserver, input_file, map) = self.build_helper()?;
 
@@ -961,7 +968,10 @@ where
     }
 
     #[expect(clippy::pedantic)]
-    fn build_helper(&mut self) -> Result<(Forkserver, InputFile, Option<SHM>), Error> {
+    fn build_helper(&mut self) -> Result<(Forkserver, InputFile, Option<SP::ShMem>), Error>
+    where
+        SP: ShMemProvider,
+    {
         let input_filename = match &self.input_filename {
             Some(name) => name.clone(),
             None => {
@@ -1035,7 +1045,7 @@ where
     fn initialize_forkserver(
         &mut self,
         status: i32,
-        map: Option<&SHM>,
+        map: Option<&SP::ShMem>,
         forkserver: &mut Forkserver,
     ) -> Result<(), Error> {
         let keep = status;
@@ -1133,7 +1143,7 @@ where
     fn initialize_old_forkserver(
         &mut self,
         status: i32,
-        map: Option<&SHM>,
+        map: Option<&SP::ShMem>,
         forkserver: &mut Forkserver,
     ) -> Result<(), Error> {
         if status & FS_OPT_ENABLED == FS_OPT_ENABLED && status & FS_OPT_MAPSIZE == FS_OPT_MAPSIZE {
@@ -1498,7 +1508,7 @@ impl<'a> ForkserverExecutorBuilder<'a, NopTargetBytesConverter<BytesInput>, Unix
 
 impl<'a, TC> ForkserverExecutorBuilder<'a, TC, UnixShMemProvider> {
     /// Shmem provider for forkserver's shared memory testcase feature.
-    pub fn shmem_provider<SP>(
+    pub fn shmem_provider<SP: ShMemProvider>(
         self,
         shmem_provider: &'a mut SP,
     ) -> ForkserverExecutorBuilder<'a, TC, SP> {
@@ -1531,7 +1541,7 @@ impl<'a, TC> ForkserverExecutorBuilder<'a, TC, UnixShMemProvider> {
 
 impl<'a, TC, SP> ForkserverExecutorBuilder<'a, TC, SP> {
     /// Shmem provider for forkserver's shared memory testcase feature.
-    pub fn target_bytes_converter<I, TC2: TargetBytesConverter<I>>(
+    pub fn target_bytes_converter<TC2: TargetBytesConverter>(
         self,
         target_bytes_converter: TC2,
     ) -> ForkserverExecutorBuilder<'a, TC2, SP> {
@@ -1570,40 +1580,54 @@ impl Default
     }
 }
 
-impl<EM, I, OT, S, SHM, TC, Z> Executor<EM, I, S, Z> for ForkserverExecutor<I, OT, S, SHM, TC>
+impl<EM, TC, OT, S, SP, Z> Executor<EM, Z> for ForkserverExecutor<TC, OT, S, SP>
 where
-    OT: ObserversTuple<I, S>,
-    S: HasExecutions,
-    TC: TargetBytesConverter<I>,
-    SHM: ShMem,
+    OT: ObserversTuple<S::Input, S>,
+    SP: ShMemProvider,
+    S: State + HasExecutions,
+    TC: TargetBytesConverter<Input = S::Input>,
+    EM: UsesState<State = S>,
 {
     #[inline]
     fn run_target(
         &mut self,
         _fuzzer: &mut Z,
-        state: &mut S,
+        state: &mut Self::State,
         _mgr: &mut EM,
-        input: &I,
+        input: &Self::Input,
     ) -> Result<ExitKind, Error> {
         self.execute_input(state, input)
     }
 }
 
-impl<I, OT, S, SHM, TC> HasTimeout for ForkserverExecutor<I, OT, S, SHM, TC> {
-    #[inline]
-    fn timeout(&self) -> Duration {
-        self.timeout.into()
-    }
-
+impl<TC, OT, S, SP> HasTimeout for ForkserverExecutor<TC, OT, S, SP>
+where
+    SP: ShMemProvider,
+{
     #[inline]
     fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = TimeSpec::from_duration(timeout);
     }
+
+    #[inline]
+    fn timeout(&self) -> Duration {
+        self.timeout.into()
+    }
 }
 
-impl<I, OT, S, SHM, TC> HasObservers for ForkserverExecutor<I, OT, S, SHM, TC>
+impl<TC, OT, S, SP> UsesState for ForkserverExecutor<TC, OT, S, SP>
 where
-    OT: ObserversTuple<I, S>,
+    S: State,
+    SP: ShMemProvider,
+{
+    type State = S;
+}
+
+impl<TC, OT, S, SP> HasObservers for ForkserverExecutor<TC, OT, S, SP>
+where
+    OT: ObserversTuple<S::Input, S>,
+    S: State,
+    SP: ShMemProvider,
 {
     type Observers = OT;
 
@@ -1630,9 +1654,7 @@ mod tests {
     use serial_test::serial;
 
     use crate::{
-        corpus::NopCorpus,
         executors::forkserver::{ForkserverExecutor, FAILED_TO_START_FORKSERVER_MSG},
-        inputs::BytesInput,
         observers::{ConstMapObserver, HitcountsMapObserver},
         Error,
     };
@@ -1662,7 +1684,7 @@ mod tests {
             .coverage_map_size(MAP_SIZE)
             .debug_child(false)
             .shmem_provider(&mut shmem_provider)
-            .build::<BytesInput, _, NopCorpus<BytesInput>>(tuple_list!(edges_observer));
+            .build::<_, ()>(tuple_list!(edges_observer));
 
         // Since /usr/bin/echo is not a instrumented binary file, the test will just check if the forkserver has failed at the initial handshake
         let result = match executor {

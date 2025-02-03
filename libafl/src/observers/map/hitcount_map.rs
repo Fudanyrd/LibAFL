@@ -221,6 +221,11 @@ where
         self.base.reset_map()
     }
 
+    #[inline]
+    fn hash_simple(&self) -> u64 {
+        self.base.hash_simple()
+    }
+
     fn to_vec(&self) -> Vec<u8> {
         self.base.to_vec()
     }
@@ -438,6 +443,10 @@ where
         self.base.reset_map()
     }
 
+    #[inline]
+    fn hash_simple(&self) -> u64 {
+        self.base.hash_simple()
+    }
     fn to_vec(&self) -> Vec<u8> {
         self.base.to_vec()
     }

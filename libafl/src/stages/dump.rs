@@ -35,19 +35,20 @@ impl_serdeany!(DumpToDiskMetadata);
 
 /// The [`DumpToDiskStage`] is a stage that dumps the corpus and the solutions to disk
 #[derive(Debug)]
-pub struct DumpToDiskStage<CB1, CB2, EM, I, S, Z> {
+pub struct DumpToDiskStage<CB1, CB2, EM, S, Z> {
     solutions_dir: PathBuf,
     corpus_dir: PathBuf,
     to_bytes: CB1,
     generate_filename: CB2,
-    phantom: PhantomData<(EM, I, S, Z)>,
+    phantom: PhantomData<(EM, S, Z)>,
 }
 
-impl<CB1, CB2, E, EM, I, S, P, Z> Stage<E, EM, S, Z> for DumpToDiskStage<CB1, CB2, EM, I, S, Z>
+impl<CB1, CB2, E, EM, S, P, Z> Stage<E, EM, S, Z> for DumpToDiskStage<CB1, CB2, EM, S, Z>
 where
-    CB1: FnMut(&Testcase<I>, &S) -> Vec<u8>,
-    CB2: FnMut(&Testcase<I>, &CorpusId) -> P,
-    S: HasCorpus<I> + HasSolutions<I> + HasRand + HasMetadata,
+    CB1: FnMut(&Testcase<<S::Corpus as Corpus>::Input>, &S) -> Vec<u8>,
+    CB2: FnMut(&Testcase<<S::Corpus as Corpus>::Input>, &CorpusId) -> P,
+    S: HasCorpus + HasSolutions + HasRand + HasMetadata,
+    S::Solutions: Corpus<Input = <S::Corpus as Corpus>::Input>,
     P: AsRef<Path>,
 {
     #[inline]
@@ -75,10 +76,12 @@ where
 }
 
 /// Implementation for `DumpToDiskStage` with a default `generate_filename` function.
-impl<CB1, EM, I, S, Z> DumpToDiskStage<CB1, fn(&Testcase<I>, &CorpusId) -> String, EM, I, S, Z>
+impl<CB1, EM, S, Z>
+    DumpToDiskStage<CB1, fn(&Testcase<<S::Corpus as Corpus>::Input>, &CorpusId) -> String, EM, S, Z>
 where
-    S: HasSolutions<I> + HasRand + HasMetadata,
-    I: Input,
+    S: HasCorpus + HasSolutions + HasRand + HasMetadata,
+    S::Solutions: Corpus<Input = <S::Corpus as Corpus>::Input>,
+    <S::Corpus as Corpus>::Input: Input,
 {
     /// Create a new [`DumpToDiskStage`] with a default `generate_filename` function.
     pub fn new<A, B>(to_bytes: CB1, corpus_dir: A, solutions_dir: B) -> Result<Self, Error>
@@ -96,7 +99,10 @@ where
 
     /// Default `generate_filename` function.
     #[expect(clippy::trivially_copy_pass_by_ref)]
-    fn generate_filename(testcase: &Testcase<I>, id: &CorpusId) -> String {
+    fn generate_filename(
+        testcase: &Testcase<<S::Corpus as Corpus>::Input>,
+        id: &CorpusId,
+    ) -> String {
         [
             Some(id.0.to_string()),
             testcase.filename().clone(),
@@ -113,9 +119,10 @@ where
     }
 }
 
-impl<CB1, CB2, EM, I, S, Z> DumpToDiskStage<CB1, CB2, EM, I, S, Z>
+impl<CB1, CB2, EM, S, Z> DumpToDiskStage<CB1, CB2, EM, S, Z>
 where
-    S: HasMetadata + HasSolutions<I>,
+    S: HasCorpus + HasMetadata + HasSolutions,
+    S::Solutions: Corpus<Input = <S::Corpus as Corpus>::Input>,
 {
     /// Create a new [`DumpToDiskStage`] with a custom `generate_filename` function.
     pub fn new_with_custom_filenames<A, B>(
@@ -158,9 +165,8 @@ where
     #[inline]
     fn dump_state_to_disk<P: AsRef<Path>>(&mut self, state: &mut S) -> Result<(), Error>
     where
-        S: HasCorpus<I>,
-        CB1: FnMut(&Testcase<I>, &S) -> Vec<u8>,
-        CB2: FnMut(&Testcase<I>, &CorpusId) -> P,
+        CB1: FnMut(&Testcase<<S::Corpus as Corpus>::Input>, &S) -> Vec<u8>,
+        CB2: FnMut(&Testcase<<S::Corpus as Corpus>::Input>, &CorpusId) -> P,
     {
         let (mut corpus_id, mut solutions_id) =
             if let Some(meta) = state.metadata_map().get::<DumpToDiskMetadata>() {

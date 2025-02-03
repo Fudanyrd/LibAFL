@@ -11,9 +11,9 @@ use libafl_bolts::llmp::LLMP_FLAG_COMPRESSED;
 use libafl_bolts::{
     llmp::{Flags, LlmpBrokerInner, LlmpHook, LlmpMsgHookResult, Tag, LLMP_FLAG_FROM_MM},
     ownedref::OwnedRef,
+    shmem::ShMemProvider,
     ClientId, Error,
 };
-use serde::Serialize;
 use tokio::{
     net::ToSocketAddrs,
     runtime::Runtime,
@@ -70,7 +70,10 @@ impl<T> NullLock<T> {
 /// It is responsible for receiving messages from other neighbours.
 /// Please check [`crate::events::multi_machine`] for more information.
 #[derive(Debug)]
-pub struct TcpMultiMachineLlmpSenderHook<A, I> {
+pub struct TcpMultiMachineLlmpSenderHook<A, I>
+where
+    I: Input,
+{
     /// the actual state of the broker hook
     shared_state: Arc<RwLock<TcpMultiMachineState<A>>>,
     /// the tokio runtime used to interact with other machines. Keep it outside to avoid locking it.
@@ -82,7 +85,10 @@ pub struct TcpMultiMachineLlmpSenderHook<A, I> {
 /// It is responsible for receiving messages from other neighbours.
 /// Please check [`crate::events::multi_machine`] for more information.
 #[derive(Debug)]
-pub struct TcpMultiMachineLlmpReceiverHook<A, I> {
+pub struct TcpMultiMachineLlmpReceiverHook<A, I>
+where
+    I: Input,
+{
     /// the actual state of the broker hook
     shared_state: Arc<RwLock<TcpMultiMachineState<A>>>,
     /// the tokio runtime used to interact with other machines. Keep it outside to avoid locking it.
@@ -90,7 +96,11 @@ pub struct TcpMultiMachineLlmpReceiverHook<A, I> {
     phantom: PhantomData<I>,
 }
 
-impl<A, I> TcpMultiMachineLlmpSenderHook<A, I> {
+impl<A, I> TcpMultiMachineLlmpSenderHook<A, I>
+where
+    A: Clone + Display + ToSocketAddrs + Send + Sync + 'static,
+    I: Input + Send + Sync + 'static,
+{
     /// Should not be created alone. Use [`TcpMultiMachineHooksBuilder`] instead.
     pub(crate) fn new(
         shared_state: Arc<RwLock<TcpMultiMachineState<A>>>,
@@ -107,7 +117,7 @@ impl<A, I> TcpMultiMachineLlmpSenderHook<A, I> {
 impl<A, I> TcpMultiMachineLlmpReceiverHook<A, I>
 where
     A: Clone + Display + ToSocketAddrs + Send + Sync + 'static,
-    I: Serialize,
+    I: Input + Send + Sync + 'static,
 {
     /// Should not be created alone. Use [`TcpMultiMachineHooksBuilder`] instead.
     ///
@@ -148,15 +158,16 @@ where
     }
 }
 
-impl<A, I, SHM, SP> LlmpHook<SHM, SP> for TcpMultiMachineLlmpSenderHook<A, I>
+impl<A, I, SP> LlmpHook<SP> for TcpMultiMachineLlmpSenderHook<A, I>
 where
-    I: Input,
-    A: Clone + Display + ToSocketAddrs + Send + Sync + 'static,
+    A: Clone + Debug + Display + ToSocketAddrs + Send + Sync + 'static,
+    SP: ShMemProvider,
+    I: Input + Send + Sync + 'static,
 {
     /// check for received messages, and forward them alongside the incoming message to inner.
     fn on_new_message(
         &mut self,
-        _broker_inner: &mut LlmpBrokerInner<SHM, SP>,
+        _broker_inner: &mut LlmpBrokerInner<SP>,
         _client_id: ClientId,
         _msg_tag: &mut Tag,
         _msg_flags: &mut Flags,
@@ -209,15 +220,16 @@ where
     }
 }
 
-impl<A, I, SHM, SP> LlmpHook<SHM, SP> for TcpMultiMachineLlmpReceiverHook<A, I>
+impl<A, I, SP> LlmpHook<SP> for TcpMultiMachineLlmpReceiverHook<A, I>
 where
-    I: Input,
-    A: Clone + Display + ToSocketAddrs + Send + Sync + 'static,
+    A: Clone + Debug + Display + ToSocketAddrs + Send + Sync + 'static,
+    SP: ShMemProvider,
+    I: Input + Send + Sync + 'static,
 {
     /// check for received messages, and forward them alongside the incoming message to inner.
     fn on_new_message(
         &mut self,
-        _broker_inner: &mut LlmpBrokerInner<SHM, SP>,
+        _broker_inner: &mut LlmpBrokerInner<SP>,
         _client_id: ClientId,
         _msg_tag: &mut Tag,
         _msg_flags: &mut Flags,

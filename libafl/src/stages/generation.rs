@@ -6,27 +6,34 @@
 
 use core::marker::PhantomData;
 
-use crate::{generators::Generator, stages::Stage, state::HasRand, Error, Evaluator};
+use crate::{
+    corpus::Corpus,
+    generators::Generator,
+    inputs::UsesInput,
+    stages::Stage,
+    state::{HasCorpus, HasRand},
+    Error, Evaluator,
+};
 
 /// A [`Stage`] that generates a single input via a [`Generator`] and evaluates
 /// it using the fuzzer, possibly adding it to the corpus.
 ///
 /// This stage can be used to construct black-box (e.g., grammar-based) fuzzers.
 #[derive(Debug)]
-pub struct GenStage<G, I, S, Z>(G, PhantomData<(I, S, Z)>);
+pub struct GenStage<G, S, Z>(G, PhantomData<(S, Z)>);
 
-impl<G, I, S, Z> GenStage<G, I, S, Z> {
+impl<G, S, Z> GenStage<G, S, Z> {
     /// Create a new [`GenStage`].
     pub fn new(g: G) -> Self {
         Self(g, PhantomData)
     }
 }
 
-impl<E, EM, G, I, S, Z> Stage<E, EM, S, Z> for GenStage<G, I, S, Z>
+impl<E, EM, G, S, Z> Stage<E, EM, S, Z> for GenStage<G, S, Z>
 where
-    G: Generator<I, S>,
-    S: HasRand,
-    Z: Evaluator<E, EM, I, S>,
+    Z: Evaluator<E, EM, <S::Corpus as Corpus>::Input, S>,
+    S: HasCorpus + HasRand + UsesInput<Input = <S::Corpus as Corpus>::Input>,
+    G: Generator<<S::Corpus as Corpus>::Input, S>,
 {
     #[inline]
     fn perform(
@@ -37,7 +44,7 @@ where
         manager: &mut EM,
     ) -> Result<(), Error> {
         let input = self.0.generate(state)?;
-        fuzzer.evaluate_filtered(state, executor, manager, &input)?;
+        fuzzer.evaluate_filtered(state, executor, manager, input)?;
         Ok(())
     }
 

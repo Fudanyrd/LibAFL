@@ -111,7 +111,8 @@ pub struct GramatronSpliceMutator;
 
 impl<S> Mutator<GramatronInput, S> for GramatronSpliceMutator
 where
-    S: HasRand + HasCorpus<GramatronInput> + HasMetadata,
+    S: HasRand + HasCorpus + HasMetadata,
+    S::Corpus: Corpus<Input = GramatronInput>,
 {
     fn mutate(
         &mut self,

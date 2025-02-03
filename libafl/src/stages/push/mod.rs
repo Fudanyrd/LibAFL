@@ -23,9 +23,10 @@ pub use mutational::StdMutationalPushStage;
 
 use crate::{
     common::HasNamedMetadata,
-    corpus::{CorpusId, HasCurrentCorpusId},
+    corpus::{Corpus, CorpusId, HasCurrentCorpusId},
     events::{EventFirer, EventRestarter, HasEventManagerId, ProgressReporter},
     executors::{Executor, ExitKind, HasObservers},
+    inputs::UsesInput,
     observers::ObserversTuple,
     schedulers::Scheduler,
     stages::{RetryCountRestartHelper, Stage},
@@ -37,13 +38,13 @@ use crate::{
 /// Should be stored inside a `[Rc<RefCell<_>>`]
 #[derive(Clone, Debug)]
 pub struct PushStageSharedState<EM, I, OT, S, Z> {
-    /// The state
+    /// The [`crate::state::State`]
     pub state: S,
     /// The [`crate::fuzzer::Fuzzer`] instance
     pub fuzzer: Z,
-    /// The event manager
+    /// The [`crate::events::EventManager`]
     pub event_mgr: EM,
-    /// The [`ObserversTuple`]
+    /// The [`crate::observers::ObserversTuple`]
     pub observers: OT,
     phantom: PhantomData<I>,
 }
@@ -206,13 +207,13 @@ pub trait PushStage<EM, I, OT, S, Z> {
 
 /// Allows us to use a [`PushStage`] as a normal [`Stage`]
 #[derive(Debug)]
-pub struct PushStageAdapter<CS, EM, I, OT, PS, Z> {
+pub struct PushStageAdapter<CS, EM, OT, PS, Z> {
     name: Cow<'static, str>,
     push_stage: PS,
-    phantom: PhantomData<(CS, EM, I, OT, Z)>,
+    phantom: PhantomData<(CS, EM, OT, Z)>,
 }
 
-impl<CS, EM, I, OT, PS, Z> PushStageAdapter<CS, EM, I, OT, PS, Z> {
+impl<CS, EM, OT, PS, Z> PushStageAdapter<CS, EM, OT, PS, Z> {
     /// Create a new [`PushStageAdapter`], wrapping the given [`PushStage`]
     /// to be used as a normal [`Stage`]
     #[must_use]
@@ -237,43 +238,33 @@ static mut PUSH_STAGE_ADAPTER_ID: usize = 0;
 /// The name for push stage adapter
 pub static PUSH_STAGE_ADAPTER_NAME: &str = "pushstageadapter";
 
-impl<CS, EM, I, OT, PS, Z> Named for PushStageAdapter<CS, EM, I, OT, PS, Z> {
+impl<CS, EM, OT, PS, Z> Named for PushStageAdapter<CS, EM, OT, PS, Z> {
     #[must_use]
     fn name(&self) -> &Cow<'static, str> {
         &self.name
     }
 }
 
-impl<CS, E, EM, I, OT, PS, S, Z> Stage<E, EM, S, Z> for PushStageAdapter<CS, EM, I, OT, PS, Z>
+impl<CS, E, EM, OT, PS, S, Z> Stage<E, EM, S, Z> for PushStageAdapter<CS, EM, OT, PS, Z>
 where
-    CS: Scheduler<I, S>,
+    CS: Scheduler<<S::Corpus as Corpus>::Input, S>,
     S: HasExecutions
         + HasRand
-        + HasCorpus<I>
+        + HasCorpus
         + HasLastReportTime
         + HasCurrentCorpusId
         + HasNamedMetadata
-        + HasMetadata,
-    E: Executor<EM, I, S, Z> + HasObservers<Observers = OT>,
-    EM: EventFirer<I, S> + EventRestarter<S> + HasEventManagerId + ProgressReporter<S>,
-    OT: ObserversTuple<I, S>,
-    PS: PushStage<EM, I, OT, S, Z>,
-    Z: ExecutesInput<E, EM, I, S>
-        + ExecutionProcessor<EM, I, OT, S>
-        + EvaluatorObservers<E, EM, I, OT>
-        + HasScheduler<I, S>,
+        + HasMetadata
+        + UsesInput<Input = <S::Corpus as Corpus>::Input>,
+    E: Executor<EM, Z, State = S> + HasObservers<Observers = OT>,
+    EM: EventFirer<State = S> + EventRestarter + HasEventManagerId + ProgressReporter<State = S>,
+    OT: ObserversTuple<<S::Corpus as Corpus>::Input, S>,
+    PS: PushStage<EM, <S::Corpus as Corpus>::Input, OT, S, Z>,
+    Z: ExecutesInput<E, EM, <S::Corpus as Corpus>::Input, S>
+        + ExecutionProcessor<EM, <S::Corpus as Corpus>::Input, OT, S>
+        + EvaluatorObservers<E, EM, <S::Corpus as Corpus>::Input, OT>
+        + HasScheduler<<S::Corpus as Corpus>::Input, S>,
 {
-    #[inline]
-    fn should_restart(&mut self, state: &mut S) -> Result<bool, Error> {
-        // TODO: Proper restart handling - call post_exec at the right time, etc...
-        RetryCountRestartHelper::no_retry(state, &self.name)
-    }
-
-    #[inline]
-    fn clear_progress(&mut self, state: &mut S) -> Result<(), Error> {
-        RetryCountRestartHelper::clear_progress(state, &self.name)
-    }
-
     fn perform(
         &mut self,
         fuzzer: &mut Z,
@@ -316,5 +307,16 @@ where
 
         self.push_stage
             .deinit(fuzzer, state, event_mgr, &mut *executor.observers_mut())
+    }
+
+    #[inline]
+    fn should_restart(&mut self, state: &mut S) -> Result<bool, Error> {
+        // TODO: Proper restart handling - call post_exec at the right time, etc...
+        RetryCountRestartHelper::no_retry(state, &self.name)
+    }
+
+    #[inline]
+    fn clear_progress(&mut self, state: &mut S) -> Result<(), Error> {
+        RetryCountRestartHelper::clear_progress(state, &self.name)
     }
 }
